@@ -586,7 +586,7 @@ def run_checks(app, window):
 
     seen = {}
 
-    def capture_write(path, content, creds=None, ensure_dirs=None, daemon_reload=True):
+    def capture_write(path, content, creds=None, ensure_dirs=None, daemon_reload=True, **kwargs):
         seen["dirs"] = ensure_dirs
         seen["reload"] = daemon_reload
         return PrivilegedWriteResult(True, None, None, False)
@@ -612,6 +612,35 @@ def run_checks(app, window):
     check("opening another file guards unsaved changes", "Discard unsaved changes?" in open_src)
     check("opening another file drops staged secrets", "_pending_credentials = []" in open_src)
     check("opening another file says where Save now writes", "Save writes here" in open_src)
+
+    # -- automount units must be started, not just generated -----------------
+    window.records = [
+        Entry("nas:/exp", "/mnt/lazy", "nfs", "noauto,x-systemd.automount,_netdev", 0, 0, existing=True),
+        Entry("UUID=Z", "/mnt/never", "ext4", "noauto", 0, 2, existing=True),
+        Entry("UUID=Y", "/mnt/plain", "ext4", "defaults", 0, 2, existing=True),
+    ]
+    arm = window._automount_mountpoints()
+    check("an automount entry is queued for arming", "/mnt/lazy" in arm)
+    check("a plain noauto entry is not armed", "/mnt/never" not in arm)
+    check("an ordinary entry needs no arming", "/mnt/plain" not in arm)
+
+    armed_seen = {}
+
+    def capture_arm(path, content, creds=None, ensure_dirs=None, daemon_reload=True,
+                    start_automounts=None):
+        armed_seen["start"] = start_automounts
+        return PrivilegedWriteResult(True, None, None, False)
+
+    orig_arm = gui.write_with_pkexec
+    gui.write_with_pkexec = capture_arm
+    try:
+        window._pending_credentials = [{"path": "/etc/z", "content": "z"}]
+        window.dirty = True
+        window._write("# body\n")
+        pump_until(lambda: window.save_btn.get_sensitive() is True)
+    finally:
+        gui.write_with_pkexec = orig_arm
+    check("saving asks systemd to arm the automount", "/mnt/lazy" in (armed_seen.get("start") or []))
 
     # -- restore from backup ------------------------------------------------
     from autofstab.backup import list_backups, diff_against

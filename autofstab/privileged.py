@@ -61,6 +61,7 @@ for directory in payload.get("ensure_dirs", []):
 # file but systemd knows nothing about it -- so x-systemd.automount does
 # nothing at all until the next reboot.
 reloaded = False
+armed = []
 if payload.get("daemon_reload"):
     try:
         import subprocess as sp
@@ -68,8 +69,24 @@ if payload.get("daemon_reload"):
     except Exception:
         reloaded = False
 
+    # daemon-reload only *generates* the automount unit. Until it's
+    # started, nothing is watching the folder, so opening it does
+    # nothing -- the trigger would otherwise only get armed at the next
+    # boot, when remote-fs.target pulls it in.
+    for mountpoint in payload.get("start_automounts", []):
+        try:
+            unit = sp.run(
+                ["systemd-escape", "-p", "--suffix=automount", mountpoint],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            if unit and sp.run(["systemctl", "start", unit], timeout=30).returncode == 0:
+                armed.append(mountpoint)
+        except Exception:
+            pass
+
 sys.stdout.write(json.dumps({
-    "backup_path": backup_path, "created": created, "reloaded": reloaded
+    "backup_path": backup_path, "created": created,
+    "reloaded": reloaded, "armed": armed
 }))
 """
 
@@ -208,7 +225,8 @@ def mount_with_pkexec(mountpoints: List[str], timeout: float = 120.0) -> MountRe
 
 
 def write_with_pkexec(path: str, content: str, credentials=None,
-                      ensure_dirs=None, daemon_reload: bool = True) -> PrivilegedWriteResult:
+                      ensure_dirs=None, daemon_reload: bool = True,
+                      start_automounts=None) -> PrivilegedWriteResult:
     """Back up and write `content` to `path` as root via pkexec.
 
     `credentials` is an optional list of {"path", "content"} dicts written
@@ -225,6 +243,7 @@ def write_with_pkexec(path: str, content: str, credentials=None,
         "credentials": credentials or [],
         "ensure_dirs": ensure_dirs or [],
         "daemon_reload": daemon_reload,
+        "start_automounts": start_automounts or [],
     }
 
     try:

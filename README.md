@@ -163,12 +163,15 @@ shares without a username and password, so fill those in first. NFS
 entries also get `nfsvers=` pinned when the server can't do v4, which
 saves a failed 4.2 → 4.1 → 4.0 negotiation on every mount.
 
-Saving also creates any missing mount point folders and runs
-`systemctl daemon-reload`. Both matter: systemd only reads fstab through
+Saving also creates any missing mount point folders, runs
+`systemctl daemon-reload`, and starts the automount unit for any
+`x-systemd.automount` entry. Both matter: systemd only reads fstab through
 `systemd-fstab-generator`, which runs at boot and on daemon-reload, so
 without it a new `x-systemd.automount` entry sits in the file doing
 nothing until you reboot — and an automount unit won't start without its
-directory anyway.
+directory anyway. Generating the unit isn't sufficient either: until it's
+started, nothing is watching the folder, so opening it does nothing and
+the share would only come alive after the next reboot.
 
 **Where the share shows up:** it's mounted at the path you chose (e.g.
 `/mnt/Home_File_Backup`), so it appears there as an ordinary folder. It

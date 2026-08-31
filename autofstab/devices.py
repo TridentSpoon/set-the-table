@@ -100,9 +100,11 @@ def display_name(node: Optional[Dict], fallback: str) -> str:
 def pending_mounts(entries) -> List:
     """Entries that fstab says should be mounted but currently aren't.
 
-    Skips the ones that mounting doesn't apply to: swap (activated with
-    swapon, not mount), pseudo-targets like "none", and anything marked
-    `noauto`, which explicitly opts out of being mounted automatically.
+    Skips the ones mounting doesn't apply to: swap (activated with
+    swapon, not mount), pseudo-targets like "none", and plain `noauto`
+    entries, which opt out of being mounted. Entries combining `noauto`
+    with `x-systemd.automount` are included -- those are meant to be
+    mounted, just on demand.
     """
     pending = []
     for entry in entries:
@@ -110,7 +112,13 @@ def pending_mounts(entries) -> List:
             continue
         if (entry.fstype or "").lower() == "swap":
             continue
-        if any(opt.strip() == "noauto" for opt in (entry.options or "").split(",")):
+        options = [o.strip() for o in (entry.options or "").split(",")]
+        # noauto means "don't mount at boot", not "never mount". An
+        # x-systemd.automount entry is meant to be mounted, just lazily --
+        # and mounting it explicitly is how a failure (a wrong share name,
+        # bad credentials) actually surfaces instead of showing an empty
+        # folder. Genuine noauto entries are still left alone.
+        if "noauto" in options and "x-systemd.automount" not in options:
             continue
         if not entry.mountpoint.startswith("/"):
             continue

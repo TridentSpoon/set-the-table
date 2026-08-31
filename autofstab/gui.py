@@ -1709,6 +1709,18 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         else:
             self._write(content)
 
+    def _automount_mountpoints(self):
+        """Mount points whose entry uses x-systemd.automount.
+
+        These need their unit started before the folder is actually
+        watched; generating the unit isn't enough on its own.
+        """
+        return [
+            e.mountpoint for e in self._entries()
+            if e.mountpoint.startswith("/")
+            and any(o.strip() == "x-systemd.automount" for o in (e.options or "").split(","))
+        ]
+
     def _mountpoints_to_create(self):
         """Mount points in the file that don't exist on disk yet.
 
@@ -1750,7 +1762,9 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             self.toast_overlay.add_toast(toast)
             _run_in_thread(
                 lambda: write_with_pkexec(
-                    self.path, content, self._pending_credentials, self._mountpoints_to_create()
+                    self.path, content, self._pending_credentials,
+                    self._mountpoints_to_create(),
+                    start_automounts=self._automount_mountpoints(),
                 ),
                 self._on_privileged_write_done,
             )
