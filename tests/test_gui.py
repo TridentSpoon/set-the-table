@@ -35,6 +35,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk
 
 from autofstab import gui
+from autofstab.gui import NetworkShareDialog
 from autofstab.model import Entry
 from autofstab.privileged import AuthResult, PrivilegedWriteResult
 
@@ -283,7 +284,7 @@ def run_checks(app, window):
         raise PermissionError("simulated: backup needs root")
 
     gui.backup_fstab = backup_denied
-    gui.write_with_pkexec = lambda path, c: PrivilegedWriteResult(True, "/etc/fstab.bak.fake", None, False)
+    gui.write_with_pkexec = lambda path, c, creds=None: PrivilegedWriteResult(True, "/etc/fstab.bak.fake", None, False)
     try:
         window.dirty = True
         window._write(content)
@@ -297,7 +298,7 @@ def run_checks(app, window):
         gui.backup_fstab = original_backup
 
     gui.backup_fstab = backup_denied
-    gui.write_with_pkexec = lambda path, c: PrivilegedWriteResult(False, None, None, True)
+    gui.write_with_pkexec = lambda path, c, creds=None: PrivilegedWriteResult(False, None, None, True)
     try:
         window.dirty = True
         window._write(content)
@@ -308,7 +309,7 @@ def run_checks(app, window):
         gui.backup_fstab = original_backup
 
     gui.backup_fstab = backup_denied
-    gui.write_with_pkexec = lambda path, c: PrivilegedWriteResult(False, None, "pkexec missing", False)
+    gui.write_with_pkexec = lambda path, c, creds=None: PrivilegedWriteResult(False, None, "pkexec missing", False)
     try:
         window.dirty = True
         window._write(content)
@@ -364,6 +365,89 @@ def run_checks(app, window):
     check(
         "mounting with an empty list short-circuits",
         original_mount([]) == MountResult(True, [], [], [], None, False),
+    )
+
+    # -- network shares ----------------------------------------------------
+    from autofstab import network
+    from autofstab.model import render_fstab as _render
+
+    smb = network.NetworkShare(network.SMB, "nas.local", "media", "/mnt/nas-media", "me", "hunter2")
+    smb_entry, cred_path = network.build_entry(smb)
+    check("SMB source is a UNC path", smb_entry.device == "//nas.local/media")
+    check("network entries never get fsck'd", smb_entry.passno == 0)
+    check(
+        "a dead NAS can't block boot (mount-on-access, not at boot)",
+        "noauto" in smb_entry.options and "x-systemd.automount" in smb_entry.options,
+    )
+    check("network entries wait for the network", "_netdev" in smb_entry.options)
+    check("SMB gets uid/gid so it isn't root-only", "uid=" in smb_entry.options and "gid=" in smb_entry.options)
+    check("SMB references a credentials file", f"credentials={cred_path}" in smb_entry.options)
+    check("THE PASSWORD IS NOT IN THE FSTAB ENTRY", "hunter2" not in (smb_entry.device + smb_entry.options))
+
+    guest_entry, guest_cred = network.build_entry(
+        network.NetworkShare(network.SMB, "192.168.1.50", "public", "/mnt/public")
+    )
+    check("a passwordless share mounts as guest", "guest" in guest_entry.options)
+    check("a passwordless share needs no credentials file", guest_cred is None)
+
+    nfs_entry, nfs_cred = network.build_entry(
+        network.NetworkShare(network.NFS, "nas.local", "/volume1/backups", "/mnt/backups")
+    )
+    check("NFS source is server:/export", nfs_entry.device == "nas.local:/volume1/backups")
+    check("NFS takes no credentials file", nfs_cred is None)
+    check("NFS omits uid/gid (server decides ownership)", "uid=" not in nfs_entry.options)
+
+    check(
+        "mount point is suggested from the export's last segment",
+        network.default_mountpoint(network.NetworkShare(network.NFS, "s", "/volume1/media", "")) == "/mnt/media",
+    )
+
+    # Adding a share should stage its secret for the next save, not write
+    # it into the file being rendered.
+    window._pending_credentials = []
+    window._add_network_share(smb)
+    staged = window._pending_credentials
+    check("adding a share stages exactly one credentials file", len(staged) == 1)
+    check("the staged file is under /etc", staged[0]["path"].startswith("/etc/"))
+    check("the staged file holds the password", "hunter2" in staged[0]["content"])
+    check("THE PASSWORD IS NOT IN THE RENDERED FSTAB", "hunter2" not in _render(window.records))
+
+    # With a secret staged, saving must go through pkexec even if fstab
+    # itself happens to be writable -- an unprivileged write can't create
+    # a root-owned 0600 file.
+    captured = {}
+    orig_write = gui.write_with_pkexec
+    def fake_write(path, content, creds=None):
+        captured["creds"] = creds
+        return PrivilegedWriteResult(True, None, None, False)
+
+    gui.write_with_pkexec = fake_write
+    try:
+        window.dirty = True
+        window._write(_render(window.records))
+        pump_until(lambda: window.save_btn.get_sensitive() is True)
+    finally:
+        gui.write_with_pkexec = orig_write
+    check("a staged secret forces the privileged write path", captured.get("creds") is not None)
+    check("the credentials reach the privileged writer", "hunter2" in captured["creds"][0]["content"])
+    check("staged secrets are dropped once written", window._pending_credentials == [])
+
+    # A share with no password must not force a password prompt.
+    window._pending_credentials = []
+    window._add_network_share(network.NetworkShare(network.SMB, "srv", "open", "/mnt/open"))
+    check("a guest share stages no secret", window._pending_credentials == [])
+
+    dialog = NetworkShareDialog(window, on_save=lambda s: None)
+    check("network dialog builds", dialog is not None)
+    check("SMB selected shows the sign-in fields", dialog.auth_group.get_visible() is True)
+    dialog.kind_row.set_selected(1)
+    check("NFS hides the sign-in fields", dialog.auth_group.get_visible() is False)
+    check("NFS asks for an export path", dialog.share_row.get_title() == "Export path")
+    dialog.kind_row.set_selected(0)
+    check("switching back restores sign-in", dialog.auth_group.get_visible() is True)
+    check(
+        "the dialog explains the boot behaviour",
+        "still boots" in dialog.note_label.get_text() or "boots normally" in dialog.note_label.get_text(),
     )
 
     # -- about dialog + update check --------------------------------------

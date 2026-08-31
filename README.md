@@ -122,6 +122,29 @@ The window has:
   (same as the ↻ button), **Open other file…** (handy for pointing the
   app at a test file), and **About Set the Table**.
 
+**Network drives (NAS, Windows shares):** the menu's **Add a network
+drive…** handles SMB/CIFS and NFS. Entries are written with
+`noauto,x-systemd.automount,_netdev`, which matters more than it looks:
+a plain network entry makes systemd wait on the mount at boot and then
+fail `remote-fs.target`, which can drop the machine to an emergency
+shell if the NAS happens to be switched off — and even `nofail` only
+downgrades that to a startup stall. With these options the share is
+mounted the first time you open it instead, so an unreachable server
+costs nothing at boot.
+
+SMB passwords are never written into fstab, which is mode 644 and
+readable by every user on the machine. They go into a root-owned
+`chmod 600` file under `/etc/samba/credentials/`, referenced from the
+entry via `credentials=`. Leave the username and password blank for a
+guest share. SMB entries also get `uid`/`gid` so the share belongs to
+you rather than root; NFS doesn't, since the server decides ownership
+there.
+
+Mounting needs a helper package that isn't always installed —
+`cifs-utils` for SMB, `nfs-utils` (`nfs-common` on Debian/Ubuntu) for
+NFS. Without it, mount fails with a bare "unknown filesystem type", so
+the dialog checks up front and names the package for your distro.
+
 **Checking for updates:** the About dialog has a **Check for Updates**
 button that asks GitHub for the latest published release and tells you
 whether you're current. If there's a newer version it offers a link to

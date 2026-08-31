@@ -15,9 +15,26 @@ import sys
 from typing import List, NamedTuple, Optional, Tuple
 
 _HELPER_SCRIPT = """
-import sys, os, shutil, datetime
-target = sys.argv[1]
-content = sys.stdin.read()
+import sys, os, json, shutil, datetime
+payload = json.load(sys.stdin)
+target = payload["target"]
+content = payload["content"]
+
+# Secrets first, so fstab never references a credentials file that
+# doesn't exist yet. Each is opened with mode 0600 from the outset --
+# creating it and chmod-ing afterwards would leave a brief window where
+# the password was world-readable.
+for cred in payload.get("credentials", []):
+    directory = os.path.dirname(cred["path"])
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    fd = os.open(cred["path"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(cred["content"])
+    os.chmod(cred["path"], 0o600)
+    os.chown(cred["path"], 0, 0)
+
 backup_path = ""
 if os.path.exists(target):
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -164,15 +181,23 @@ def mount_with_pkexec(mountpoints: List[str], timeout: float = 120.0) -> MountRe
     )
 
 
-def write_with_pkexec(path: str, content: str) -> PrivilegedWriteResult:
-    """Back up and write `content` to `path` as root via pkexec."""
+def write_with_pkexec(path: str, content: str, credentials=None) -> PrivilegedWriteResult:
+    """Back up and write `content` to `path` as root via pkexec.
+
+    `credentials` is an optional list of {"path", "content"} dicts written
+    first, each root-owned and chmod 600 -- for share passwords, which
+    must never go into world-readable fstab. Everything travels over
+    stdin rather than argv, so no secret is ever visible in `ps`.
+    """
     if not shutil.which("pkexec"):
         return PrivilegedWriteResult(False, None, _NO_PKEXEC_MESSAGE, False)
 
+    payload = {"target": path, "content": content, "credentials": credentials or []}
+
     try:
         result = subprocess.run(
-            ["pkexec", sys.executable, "-c", _HELPER_SCRIPT, path],
-            input=content,
+            ["pkexec", sys.executable, "-c", _HELPER_SCRIPT],
+            input=json.dumps(payload),
             capture_output=True,
             text=True,
         )

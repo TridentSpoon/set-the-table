@@ -32,7 +32,7 @@ from .devices import (
 )
 from .model import Entry, format_entry_line, parse_fstab, render_fstab
 from .privileged import authenticate_via_pkexec, mount_with_pkexec, write_with_pkexec
-from . import updates
+from . import network, updates
 from .validate import dry_run_verify, validate_entries
 
 
@@ -263,6 +263,149 @@ class EntryRow(Gtk.ListBoxRow):
         row.append(left_box)
         row.append(details)
         self.set_child(row)
+
+
+class NetworkShareDialog(Adw.Dialog):
+    """Add a NAS / network share.
+
+    Kept separate from the block-device form because the useful questions
+    are different (server and share name, not a UUID) and because the
+    options that make a network mount safe -- mount-on-access rather than
+    at boot -- aren't something the user should have to know to type.
+    """
+
+    def __init__(self, parent_window: Gtk.Window, on_save):
+        super().__init__()
+        self.parent_window = parent_window
+        self.on_save = on_save
+        self.set_title("Add a network drive")
+        self.set_content_width(480)
+        self.set_follows_content_size(True)
+        self.set_presentation_mode(Adw.DialogPresentationMode.FLOATING)
+
+        toolbar_view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda b: self.close())
+        header.pack_start(cancel)
+
+        add = Gtk.Button(label="Add")
+        add.add_css_class("suggested-action")
+        add.connect("clicked", self._on_add_clicked)
+        header.pack_end(add)
+        toolbar_view.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+
+        server_group = Adw.PreferencesGroup(title="Where is it?")
+        self.kind_row = Adw.ComboRow(title="Type")
+        self.kind_row.set_model(Gtk.StringList.new([
+            "Windows / NAS share (SMB)",
+            "NFS export",
+        ]))
+        self.kind_row.set_selected(0)
+        self.kind_row.connect("notify::selected", lambda *_: self._sync_kind())
+        server_group.add(self.kind_row)
+
+        self.server_row = Adw.EntryRow(title="Server")
+        self.server_row.set_tooltip_text("Hostname or IP address, e.g. nas.local or 192.168.1.50")
+        server_group.add(self.server_row)
+
+        self.share_row = Adw.EntryRow(title="Share name")
+        self.share_row.connect("changed", lambda *_: self._suggest_mountpoint())
+        server_group.add(self.share_row)
+        page.add(server_group)
+
+        mount_group = Adw.PreferencesGroup(title="Where should it appear?")
+        self.mount_row = Adw.EntryRow(title="Mount point")
+        mount_group.add(self.mount_row)
+        page.add(mount_group)
+
+        self.auth_group = Adw.PreferencesGroup(
+            title="Sign in",
+            description="Leave both blank for a guest/public share. The password is saved to a "
+                        "root-only file (chmod 600) and referenced from fstab — it is never "
+                        "written into fstab itself, which is readable by everyone.",
+        )
+        self.username_row = Adw.EntryRow(title="Username")
+        self.auth_group.add(self.username_row)
+        self.password_row = Adw.PasswordEntryRow(title="Password")
+        self.auth_group.add(self.password_row)
+        page.add(self.auth_group)
+
+        self.note_group = Adw.PreferencesGroup()
+        self.note_label = Gtk.Label(xalign=0, wrap=True)
+        self.note_label.add_css_class("caption")
+        self.note_group.add(self.note_label)
+        page.add(self.note_group)
+
+        toolbar_view.set_content(page)
+        self.set_child(toolbar_view)
+        self._sync_kind()
+
+    def _current_kind(self):
+        return network.SMB if self.kind_row.get_selected() == 0 else network.NFS
+
+    def _sync_kind(self):
+        kind = self._current_kind()
+        is_smb = kind == network.SMB
+        self.auth_group.set_visible(is_smb)
+        self.share_row.set_title("Share name" if is_smb else "Export path")
+        self.share_row.set_tooltip_text(
+            "The share as advertised by the NAS, e.g. media"
+            if is_smb
+            else "The exported path on the server, e.g. /volume1/media"
+        )
+
+        notes = [
+            "This share is mounted the first time you open it, not during startup — "
+            "so if the server is switched off, your machine still boots normally."
+        ]
+        missing = network.helper_missing(kind)
+        if missing:
+            notes.append(network.install_hint(kind))
+        self.note_label.set_text("\n\n".join(notes))
+        self.note_label.remove_css_class("warning")
+        if missing:
+            self.note_label.add_css_class("warning")
+        self._suggest_mountpoint()
+
+    def _suggest_mountpoint(self):
+        # Only fill in a suggestion while the user hasn't typed their own.
+        if getattr(self, "_mount_edited", False):
+            return
+        share_text = self.share_row.get_text().strip()
+        if not share_text:
+            return
+        probe = network.NetworkShare(
+            self._current_kind(), self.server_row.get_text().strip() or "server", share_text, ""
+        )
+        self.mount_row.set_text(network.default_mountpoint(probe))
+
+    def _on_add_clicked(self, button):
+        server = self.server_row.get_text().strip()
+        share = self.share_row.get_text().strip()
+        mountpoint = self.mount_row.get_text().strip()
+
+        ok = True
+        for row, value in ((self.server_row, server), (self.share_row, share), (self.mount_row, mountpoint)):
+            row.remove_css_class("error") if value else row.add_css_class("error")
+            ok = ok and bool(value)
+        if not ok:
+            return
+
+        kind = self._current_kind()
+        share_obj = network.NetworkShare(
+            kind=kind,
+            server=server,
+            share=share,
+            mountpoint=mountpoint,
+            username=self.username_row.get_text().strip() or None if kind == network.SMB else None,
+            password=self.password_row.get_text() or None if kind == network.SMB else None,
+        )
+        self.on_save(share_obj)
+        self.close()
 
 
 class AboutDialog(Adw.Dialog):
@@ -811,6 +954,10 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         self._force_close = False
         self.critical_unlocked = False
         self._auth_toast = None
+        # Credential files to write, root-owned and 0600, next time we
+        # save -- batched so adding a share costs one password prompt,
+        # not one per share plus another for the fstab write.
+        self._pending_credentials = []
         self.records = parse_fstab(path) if os.path.exists(path) else []
 
         self._build_ui()
@@ -885,6 +1032,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
         menu = Gio.Menu()
         menu.append("Add entry manually…", "win.add_manual")
+        menu.append("Add a network drive…", "win.add_network")
         menu.append("Reload from disk", "win.reload")
         menu.append("Open other file…", "win.open")
         menu.append("About Set the Table", "win.about")
@@ -892,6 +1040,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         header.pack_end(menu_btn)
 
         self._add_action("add_manual", self._on_add_manual_clicked)
+        self._add_action("add_network", self._on_add_network_clicked)
         self._add_action("reload", self._on_reload)
         self._add_action("open", self._on_open)
         self._add_action("about", self._on_about)
@@ -1186,6 +1335,23 @@ class AutoFstabWindow(Adw.ApplicationWindow):
     def _on_add_manual_clicked(self, action, param):
         EntryFormDialog(self, entry=None, on_save=self._add_entry_confirmed).present(self)
 
+    def _on_add_network_clicked(self, action, param):
+        NetworkShareDialog(self, on_save=self._add_network_share).present(self)
+
+    def _add_network_share(self, share):
+        entry, credentials_path = network.build_entry(share)
+        if credentials_path:
+            self._pending_credentials.append({
+                "path": credentials_path,
+                "content": network.credentials_content(share.username or "", share.password or ""),
+            })
+        self._add_entry_confirmed(entry)
+
+        note = f"Added {entry.mountpoint} — mounts when you first open it"
+        if network.helper_missing(share.kind):
+            note = f"Added {entry.mountpoint} — but the mount helper isn't installed yet"
+        self.toast_overlay.add_toast(Adw.Toast.new(note))
+
     def _quick_add_device(self, device, node):
         settings = suggest_mount_settings(node)
         entry = Entry(
@@ -1284,6 +1450,10 @@ class AutoFstabWindow(Adw.ApplicationWindow):
     def _write(self, content):
         backup_path = None
         try:
+            if self._pending_credentials:
+                # Credential files must be root-owned and 0600, which an
+                # unprivileged write can't produce -- go straight to pkexec.
+                raise PermissionError("credential files require root")
             if os.path.exists(self.path):
                 backup_path = backup_fstab(self.path)
             with open(self.path, "w") as f:
@@ -1297,7 +1467,10 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             toast.set_timeout(0)
             self._auth_toast = toast
             self.toast_overlay.add_toast(toast)
-            _run_in_thread(lambda: write_with_pkexec(self.path, content), self._on_privileged_write_done)
+            _run_in_thread(
+                lambda: write_with_pkexec(self.path, content, self._pending_credentials),
+                self._on_privileged_write_done,
+            )
             return
 
         self._finish_save(backup_path)
@@ -1320,6 +1493,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         self._finish_save(result.backup_path)
 
     def _finish_save(self, backup_path):
+        self._pending_credentials = []
         for r in self._entries():
             r.existing = True
         self.dirty = False
