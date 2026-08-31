@@ -613,6 +613,76 @@ def run_checks(app, window):
     check("opening another file drops staged secrets", "_pending_credentials = []" in open_src)
     check("opening another file says where Save now writes", "Save writes here" in open_src)
 
+    # -- restore from backup ------------------------------------------------
+    from autofstab.backup import list_backups, diff_against
+    import tempfile, datetime as _dt
+
+    tmpdir = tempfile.mkdtemp(prefix="stt-restore-")
+    target = os.path.join(tmpdir, "fstab")
+    with open(target, "w") as f:
+        f.write("UUID=A / ext4 defaults 0 1\nUUID=B /home ext4 defaults 0 2\n")
+    older = target + ".bak.20260101-101010"
+    with open(older, "w") as f:
+        f.write("UUID=A / ext4 defaults 0 1\n")
+    same = target + ".bak.20260101-111111"
+    with open(same, "w") as f:
+        f.write("UUID=A / ext4 defaults 0 1\nUUID=B /home ext4 defaults 0 2\n")
+    with open(target + ".bak.not-a-timestamp", "w") as f:
+        f.write("junk\n")
+
+    found = list_backups(target)
+    check("backups are listed newest first", [b.when.hour for b in found] == [11, 10])
+    check("a malformed backup name is ignored", len(found) == 2)
+    check("entry counts are read from each backup", found[1].entry_count == 1)
+    check("a backup identical to the current file is flagged", found[0].is_current is True)
+    check("a differing backup is not flagged as current", found[1].is_current is False)
+
+    diff = diff_against(older, target)
+    check("the diff shows what restoring would remove", "-UUID=B /home ext4 defaults 0 2" in diff)
+    check("an identical backup says so plainly", "change nothing" in diff_against(same, target))
+    check("an unreadable backup degrades to a message",
+          "Couldn't read" in diff_against(os.path.join(tmpdir, "nope"), target))
+
+    restore_dialog = gui.RestoreBackupDialog(window, target, on_restore=lambda b: None)
+    check("restore dialog builds with backups present", restore_dialog is not None)
+    empty_dialog = gui.RestoreBackupDialog(window, os.path.join(tmpdir, "no-such"), on_restore=lambda b: None)
+    check("restore dialog copes with no backups at all", empty_dialog is not None)
+
+    # Restore goes through the normal save path. Here the target is
+    # writable, so it completes unprivileged -- assert on the file itself
+    # rather than on a mock that legitimately never gets called.
+    previous_path = window.path
+    window.path = target
+    window._restore_backup(found[1])
+    pump_until(lambda: window._restoring_from is None)
+    check("restoring writes the backup's contents back",
+          open(target).read() == "UUID=A / ext4 defaults 0 1\n")
+    check("restoring backs up what was there first",
+          any(b.entry_count == 2 for b in list_backups(target)))
+    check("the view is re-read from the restored file", len(window._entries()) == 1)
+    check("the restore marker is cleared afterwards", window._restoring_from is None)
+    window.path = previous_path
+
+    import shutil as _sh
+    _sh.rmtree(tmpdir, ignore_errors=True)
+
+    # -- dev-only menu item --------------------------------------------------
+    check("Open other file is hidden by default", window.dev_mode is False)
+
+    # -- update popup on launch ---------------------------------------------
+    from autofstab import updates as _updates
+    orig_check = _updates.check_for_update
+    popped = {}
+    try:
+        window._on_launch_update(_updates.UpdateResult(
+            _updates.UP_TO_DATE, "0.1.0", "You're up to date."))
+        check("being up to date shows no popup", not popped)
+        window._on_launch_update(_updates.UpdateResult(
+            _updates.ERROR, None, "Couldn't reach GitHub."))
+        check("an unreachable server shows no popup either", not popped)
+    finally:
+        _updates.check_for_update = orig_check
+
     # -- about dialog + update check --------------------------------------
     from autofstab import updates
 

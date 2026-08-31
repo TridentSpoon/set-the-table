@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from . import __version__
-from .backup import backup_fstab
+from .backup import backup_fstab, diff_against, list_backups
 from .devices import (
     current_root_identity,
     describe_transport,
@@ -513,6 +513,87 @@ class NetworkSharePage(Adw.PreferencesPage):
         self.on_save(share_obj)
         if self.on_done:
             self.on_done()
+
+
+class RestoreBackupDialog(Adw.Dialog):
+    """Pick one of the timestamped backups and put it back.
+
+    Every save writes a backup, so these accumulate; this is the only way
+    to get one back without a terminal. Restoring goes through the same
+    privileged write as an ordinary save, which means the file as it
+    stands right now is itself backed up first -- so restoring is just as
+    undoable as the change that prompted it.
+    """
+
+    def __init__(self, parent_window, path, on_restore):
+        super().__init__()
+        self.parent_window = parent_window
+        self.path = path
+        self.on_restore = on_restore
+        self.set_title("Restore a backup")
+        self.set_content_width(560)
+        self.set_content_height(480)
+        self.set_presentation_mode(Adw.DialogPresentationMode.FLOATING)
+
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(Adw.HeaderBar())
+        page = Adw.PreferencesPage()
+
+        backups = list_backups(path)
+        group = Adw.PreferencesGroup(
+            title="Backups of this file",
+            description=(
+                f"Every save writes one of these. Restoring replaces {path}, and backs up "
+                "what's there now first, so you can step back again."
+                if backups else ""
+            ),
+        )
+
+        if not backups:
+            group.set_description(
+                f"There are no backups of {path} yet. One is written automatically "
+                "each time you save."
+            )
+        else:
+            for backup in backups:
+                entries = f"{backup.entry_count} entr" + ("y" if backup.entry_count == 1 else "ies")
+                subtitle = f"{entries} · {os.path.basename(backup.path)}"
+                if backup.is_current:
+                    subtitle = "Matches the file as it is now · " + subtitle
+                row = Adw.ActionRow(
+                    title=backup.when.strftime("%A %d %B, %H:%M:%S"),
+                    subtitle=subtitle,
+                )
+                row.set_activatable(True)
+                if backup.is_current:
+                    row.add_css_class("dim-label")
+                row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+                row.connect("activated", self._on_selected, backup)
+                group.add(row)
+
+        page.add(group)
+        toolbar_view.set_content(page)
+        self.set_child(toolbar_view)
+
+    def _on_selected(self, row, backup):
+        diff = diff_against(backup.path, self.path)
+        dialog = Adw.AlertDialog.new(
+            f"Restore the backup from {backup.when:%H:%M:%S}?",
+            f"This replaces {self.path}. What's there now is backed up first.",
+        )
+        dialog.set_extra_child(_report_widget(diff, max_height=260))
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("restore", "Restore")
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def responded(source, result):
+            if source.choose_finish(result) == "restore":
+                self.close()
+                self.on_restore(backup)
+
+        dialog.choose(self, None, responded)
 
 
 class AboutDialog(Adw.Dialog):
@@ -1074,9 +1155,12 @@ class EntryFormDialog(Adw.Dialog):
 
 
 class AutoFstabWindow(Adw.ApplicationWindow):
-    def __init__(self, app: Adw.Application, path: str):
+    def __init__(self, app: Adw.Application, path: str, dev_mode: bool = False,
+                 check_updates: bool = True):
         super().__init__(application=app, title="Set the Table", default_width=820, default_height=580)
         self.path = path
+        self.dev_mode = dev_mode
+        self._restoring_from = None
         self.dirty = False
         self._force_close = False
         self.critical_unlocked = False
@@ -1091,6 +1175,9 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         self._refresh_list()
         self.connect("close-request", self._on_close_request)
 
+        if check_updates:
+            GLib.timeout_add_seconds(2, self._check_updates_on_launch)
+
         if path == "/etc/fstab" and os.geteuid() != 0:
             # Deferred until the window is actually mapped to the screen --
             # adding a toast (which slides in with an animation) before the
@@ -1099,6 +1186,30 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             # kind of layout glitch reported (content sliding off to the
             # left). "map" only fires once real geometry exists.
             self.connect("map", self._show_startup_toast)
+
+    def _check_updates_on_launch(self):
+        _run_in_thread(lambda: updates.check_for_update(__version__), self._on_launch_update)
+        return False
+
+    def _on_launch_update(self, result):
+        # Only speak up when there is genuinely something newer. Being up
+        # to date, offline, or rate-limited are all silent -- a launch-time
+        # popup for "nothing to do" would be pure noise.
+        if result.status != updates.UPDATE_AVAILABLE:
+            return
+
+        dialog = Adw.AlertDialog.new("An update is available", result.message)
+        dialog.add_response("later", "Later")
+        dialog.add_response("open", "Open download page")
+        dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("open")
+        dialog.set_close_response("later")
+
+        def responded(source, response_result):
+            if source.choose_finish(response_result) == "open":
+                Gtk.UriLauncher.new(result.url).launch(self, None, None)
+
+        dialog.choose(self, None, responded)
 
     def _show_startup_toast(self, window):
         self.disconnect_by_func(self._show_startup_toast)
@@ -1160,14 +1271,19 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Add entry manually…", "win.add_manual")
         menu.append("Refresh / Reconnect", "win.reload")
-        menu.append("Open other file…", "win.open")
+        menu.append("Restore from backup…", "win.restore")
         menu.append("About Set the Table", "win.about")
+        if self.dev_mode:
+            # Retargets Save at another file -- useful for testing against
+            # a scratch fstab, confusing otherwise, so it's behind --dev.
+            menu.append("Open other file… (dev)", "win.open")
         menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main menu")
         header.pack_end(menu_btn)
 
         self._add_action("add_manual", self._on_add_manual_clicked)
         self._add_action("reload", self._on_reload)
         self._add_action("open", self._on_open)
+        self._add_action("restore", self._on_restore)
         self._add_action("about", self._on_about)
 
         toolbar_view.add_top_bar(header)
@@ -1661,6 +1777,19 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
     def _finish_save(self, backup_path):
         self._pending_credentials = []
+
+        if self._restoring_from is not None:
+            # The file on disk is now the backup's content, so re-read it
+            # rather than leaving the pre-restore records on screen.
+            restored = self._restoring_from
+            self._restoring_from = None
+            self.records = parse_fstab(self.path) if os.path.exists(self.path) else []
+            self.dirty = False
+            self._refresh_list()
+            toast = Adw.Toast.new(f"Restored the backup from {restored.when:%H:%M:%S}")
+            toast.set_timeout(5)
+            self.toast_overlay.add_toast(toast)
+            return
         for r in self._entries():
             r.existing = True
         self.dirty = False
@@ -1815,6 +1944,33 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         else:
             do_open()
 
+    def _on_restore(self, action, param):
+        def show():
+            RestoreBackupDialog(self, self.path, self._restore_backup).present(self)
+
+        if self.dirty:
+            self._confirm(
+                heading="Discard unsaved changes?",
+                body="Restoring a backup replaces the file, including anything you haven't saved.",
+                ok_label="Discard",
+                destructive=True,
+                on_result=lambda ok: show() if ok else None,
+            )
+        else:
+            show()
+
+    def _restore_backup(self, backup):
+        try:
+            content = open(backup.path).read()
+        except OSError as e:
+            self._info("Couldn't read that backup", str(e))
+            return
+        # Goes through the normal save path, so the current file is backed
+        # up first and systemd is reloaded afterwards.
+        self._restoring_from = backup
+        self.dirty = True
+        self._write(content)
+
     def _on_about(self, action, param):
         AboutDialog().present(self)
 
@@ -1837,7 +1993,8 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
 
 class AutoFstabApp(Adw.Application):
-    def __init__(self, path: str):
+    def __init__(self, path: str, dev_mode: bool = False,
+                 check_updates: bool = True):
         # NON_UNIQUE: without this, launching the app a second time (e.g. with
         # a different --file) just re-presents whatever instance is already
         # running instead of opening the file you asked for.
@@ -1846,21 +2003,27 @@ class AutoFstabApp(Adw.Application):
             flags=Gio.ApplicationFlags.NON_UNIQUE,
         )
         self.path = path
+        self.dev_mode = dev_mode
+        self.check_updates = check_updates
         self.window = None
         self.connect("activate", self._on_activate)
 
     def _on_activate(self, app):
         if not self.window:
-            self.window = AutoFstabWindow(self, self.path)
+            self.window = AutoFstabWindow(self, self.path, self.dev_mode, self.check_updates)
         self.window.present()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Interactive GUI fstab editor with backup, validation, and dry-run checks.")
     parser.add_argument("-f", "--file", default="/etc/fstab", help="Path to the fstab file to edit (default: /etc/fstab)")
+    parser.add_argument("--dev", action="store_true",
+                        help="Show developer-only menu items, such as opening a different file")
+    parser.add_argument("--no-update-check", action="store_true",
+                        help="Don't contact GitHub for a new version when the app starts")
     args = parser.parse_args()
 
-    app = AutoFstabApp(args.file)
+    app = AutoFstabApp(args.file, dev_mode=args.dev, check_updates=not args.no_update_check)
     return app.run(sys.argv[:1])
 
 

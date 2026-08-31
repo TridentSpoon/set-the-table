@@ -173,12 +173,26 @@ Mounting needs a helper package that isn't always installed —
 NFS. Without it, mount fails with a bare "unknown filesystem type", so
 the dialog checks up front and names the package for your distro.
 
+**Restoring a backup:** every save writes a timestamped backup beside the
+file. **☰ → Restore from backup…** lists them newest first, with how many
+entries each held and which one matches the file as it stands. Picking one
+shows a diff of exactly what restoring would change before you commit to
+it. Restoring goes through the same path as a normal save, so the current
+file is backed up first — stepping back is itself undoable — and systemd
+is reloaded afterwards.
+
 **Checking for updates:** the About dialog has a **Check for Updates**
-button that asks GitHub for the latest published release and tells you
-whether you're current. If there's a newer version it offers a link to
-the download page — it never downloads or installs anything by itself.
-The check only runs when you click it: the app makes no network requests
-just from being launched, and doesn't check on a timer in the background.
+button, and the app also checks once a couple of seconds after launch. It
+only speaks up when there's genuinely something newer: being up to date,
+offline, or rate-limited are all silent, since a popup for "nothing to do"
+is just noise. It never downloads or installs anything by itself — the
+button opens the release page. Launch `--no-update-check` to stop it
+contacting GitHub at startup.
+
+**Developer options:** `--dev` adds *Open other file…* to the menu, which
+retargets the whole app — Save included — at a different fstab. Handy for
+testing against a scratch file, confusing enough in normal use that it's
+hidden by default.
 
 **Smart defaults on quick-add:** NTFS/exFAT/FAT drives get
 `uid=<you>,gid=<you>,umask=022,nofail` (so they're usable without being root
