@@ -12,6 +12,7 @@ is simply a folder that isn't populated yet.
 """
 
 import os
+import socket
 import shutil
 import subprocess
 from typing import List, NamedTuple, Optional
@@ -175,3 +176,167 @@ def build_entry(share: NetworkShare, nfs_version: Optional[int] = None):
         passno=0,  # never fsck a network share
     )
     return entry, credentials_path
+
+
+# --- discovery ---------------------------------------------------------
+#
+# Finding a NAS reliably needs more than one method. mDNS only sees
+# servers that advertise; NetBIOS needs SMB1-era broadcast, which modern
+# NAS boxes often disable; and the ARP neighbour table only lists hosts
+# this machine has already talked to, so a freshly powered-on NAS is
+# invisible to it. A short connect-scan of the local subnet is the only
+# approach that reliably finds one, so it's offered as an explicit,
+# user-triggered action rather than something the app does on its own.
+
+SERVICE_PORTS = {445: SMB, 2049: NFS}
+
+
+class DiscoveredServer(NamedTuple):
+    host: str
+    services: List[str]   # SMB and/or NFS
+    name: Optional[str] = None
+
+
+def local_subnets() -> List[str]:
+    """Local IPv4 /24-or-smaller networks, as 'a.b.c.' prefixes.
+
+    Anything wider than a /24 is skipped: scanning it would mean tens of
+    thousands of connections, which is neither quick nor neighbourly.
+    """
+    prefixes = []
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "scope", "global"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return prefixes
+
+    for line in out.splitlines():
+        for token in line.split():
+            if "/" not in token:
+                continue
+            address, _, bits = token.partition("/")
+            if address.count(".") != 3 or not bits.isdigit():
+                continue
+            if int(bits) < 24:
+                continue
+            prefixes.append(address.rsplit(".", 1)[0] + ".")
+            break
+    return sorted(set(prefixes))
+
+
+def _port_open(host: str, port: int, timeout: float) -> bool:
+    sock = socket.socket()
+    sock.settimeout(timeout)
+    try:
+        return sock.connect_ex((host, port)) == 0
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def netbios_name(host: str, timeout: float = 3.0) -> Optional[str]:
+    """The NetBIOS name of a host, for showing something friendlier than an IP."""
+    if not shutil.which("nmblookup"):
+        return None
+    try:
+        out = subprocess.run(
+            ["nmblookup", "-A", host], capture_output=True, text=True, timeout=timeout
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        # "GRINGOTTS  <20> - B <ACTIVE>" -- <20> is the file-server service.
+        if len(parts) >= 2 and parts[1] == "<20>" and not parts[0].startswith("."):
+            return parts[0]
+    return None
+
+
+def discover_servers(timeout: float = 0.6, workers: int = 128) -> List[DiscoveredServer]:
+    """Find hosts on the local network answering on an SMB or NFS port."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    targets = []
+    for prefix in local_subnets():
+        for last in range(1, 255):
+            for port in SERVICE_PORTS:
+                targets.append((f"{prefix}{last}", port))
+    if not targets:
+        return []
+
+    found = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = pool.map(lambda t: (t, _port_open(t[0], t[1], timeout)), targets)
+        for (host, port), is_open in results:
+            if is_open:
+                found.setdefault(host, set()).add(SERVICE_PORTS[port])
+
+    servers = []
+    for host in sorted(found, key=lambda h: [int(p) for p in h.split(".")]):
+        servers.append(DiscoveredServer(host, sorted(found[host]), netbios_name(host)))
+    return servers
+
+
+def list_nfs_exports(host: str, timeout: float = 8.0) -> List[str]:
+    """Export paths the NFS server offers. Needs no authentication."""
+    if not shutil.which("showmount"):
+        return []
+    try:
+        result = subprocess.run(
+            ["showmount", "-e", "--no-headers", host],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    exports = []
+    for line in result.stdout.splitlines():
+        path = line.split()[0] if line.split() else ""
+        if path.startswith("/"):
+            exports.append(path)
+    return exports
+
+
+def list_smb_shares(host: str, username: str = "", password: str = "",
+                    timeout: float = 15.0) -> List[str]:
+    """Share names the SMB server offers.
+
+    Many servers refuse anonymous enumeration, in which case credentials
+    are required and an empty list comes back. Administrative shares
+    (IPC$, print$, and other $-suffixed ones) are filtered out -- they
+    aren't things anyone wants in fstab.
+    """
+    if not shutil.which("smbclient"):
+        return []
+
+    command = ["smbclient", "-L", f"//{host}", "-g"]
+    env = dict(os.environ)
+    if username:
+        command += ["-U", username]
+        # Passed via the environment rather than argv, so it never shows
+        # up in `ps` output.
+        env["PASSWD"] = password or ""
+    else:
+        command.append("-N")
+
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout, env=env
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    shares = []
+    for line in result.stdout.splitlines():
+        # -g gives machine-readable "Disk|name|comment" records.
+        parts = line.split("|")
+        if len(parts) >= 2 and parts[0].strip().lower() == "disk":
+            name = parts[1].strip()
+            if name and not name.endswith("$"):
+                shares.append(name)
+    return shares

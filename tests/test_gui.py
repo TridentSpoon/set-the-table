@@ -454,6 +454,72 @@ def run_checks(app, window):
     window._add_network_share(network.NetworkShare(network.SMB, "srv", "open", "/mnt/open"))
     check("a guest share stages no secret", window._pending_credentials == [])
 
+    # -- discovery ---------------------------------------------------------
+    # Real scans are avoided here (slow, and dependent on what's powered on);
+    # the wiring is exercised with stubbed results instead.
+    check("subnet detection returns dotted prefixes",
+          all(p.count(".") == 3 and p.endswith(".") for p in network.local_subnets()))
+
+    orig_discover = network.discover_servers
+    orig_nfs = network.list_nfs_exports
+    orig_smb = network.list_smb_shares
+
+    scan_dialog = NetworkShareDialog(window, on_save=lambda s: None)
+    try:
+        network.discover_servers = lambda *a, **k: [
+            network.DiscoveredServer("10.0.0.5", [network.SMB, network.NFS], "NAS"),
+            network.DiscoveredServer("10.0.0.6", [network.NFS], None),
+        ]
+        scan_dialog._on_scan_clicked(None)
+        pump_until(lambda: scan_dialog.scan_button.get_sensitive() is True)
+        check("scanning re-enables its button when done", scan_dialog.scan_button.get_sensitive() is True)
+    finally:
+        network.discover_servers = orig_discover
+
+    scan_dialog._apply_server(network.DiscoveredServer("10.0.0.6", [network.NFS], None))
+    check("picking an NFS-only server selects NFS", scan_dialog.kind_row.get_selected() == 1)
+    check("picking a server fills its address", scan_dialog.server_row.get_text() == "10.0.0.6")
+    scan_dialog._apply_server(network.DiscoveredServer("10.0.0.7", [network.SMB], None))
+    check("picking an SMB-only server selects SMB", scan_dialog.kind_row.get_selected() == 0)
+    check(
+        "a server offering both leaves the choice alone",
+        (lambda before: (scan_dialog._apply_server(
+            network.DiscoveredServer("10.0.0.8", [network.SMB, network.NFS], None)
+        ), scan_dialog.kind_row.get_selected() == before)[1])(scan_dialog.kind_row.get_selected()),
+    )
+
+    scan_dialog.server_row.set_text("10.0.0.5")
+    try:
+        network.list_nfs_exports = lambda *a, **k: ["/volume1/media", "/volume1/backups"]
+        scan_dialog.kind_row.set_selected(1)
+        scan_dialog._on_browse_clicked(None)
+        pump_until(lambda: scan_dialog.browse_button.get_sensitive() is True)
+        check("browsing re-enables its button", scan_dialog.browse_button.get_sensitive() is True)
+    finally:
+        network.list_nfs_exports = orig_nfs
+
+    scan_dialog._apply_share("/volume1/media")
+    check("picking an export fills the field", scan_dialog.share_row.get_text() == "/volume1/media")
+    check("picking an export re-suggests the mount point",
+          scan_dialog.mount_row.get_text() == "/mnt/media")
+
+    try:
+        network.list_smb_shares = lambda *a, **k: []
+        scan_dialog.kind_row.set_selected(0)
+        scan_dialog._on_browse_clicked(None)
+        pump_until(lambda: scan_dialog.browse_button.get_sensitive() is True)
+        check("an empty share list explains why, rather than failing silently",
+              "username and password" in scan_dialog.note_label.get_text())
+    finally:
+        network.list_smb_shares = orig_smb
+
+    # The SMB password must reach smbclient by environment, never argv,
+    # since argv is visible to any user via `ps`.
+    import inspect as _inspect
+    smb_src = _inspect.getsource(network.list_smb_shares)
+    check("SMB browse passes the password via the environment", 'env["PASSWD"]' in smb_src)
+    check("SMB browse never puts the password in argv", '"-U", username' in smb_src and "password]" not in smb_src)
+
     dialog = NetworkShareDialog(window, on_save=lambda s: None)
     check("network dialog builds", dialog is not None)
     check("SMB selected shows the sign-in fields", dialog.auth_group.get_visible() is True)

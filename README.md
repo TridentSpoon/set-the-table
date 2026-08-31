@@ -140,6 +140,19 @@ guest share. SMB entries also get `uid`/`gid` so the share belongs to
 you rather than root; NFS doesn't, since the server decides ownership
 there.
 
+The dialog can find things for you rather than making you type them.
+The **search** button next to Server scans your local subnet for hosts
+answering on SMB (445) or NFS (2049) and lists them by NetBIOS name —
+this is the only method that reliably finds a NAS, since mDNS only sees
+servers that advertise, NetBIOS broadcast needs SMB1-era discovery that
+modern NAS boxes disable, and the ARP table only knows hosts you've
+already talked to. It's an explicit button press, never automatic. The
+**folder** button next to Share asks the chosen server what it offers:
+NFS exports need no credentials, while most SMB servers won't list
+shares without a username and password, so fill those in first. NFS
+entries also get `nfsvers=` pinned when the server can't do v4, which
+saves a failed 4.2 → 4.1 → 4.0 negotiation on every mount.
+
 Mounting needs a helper package that isn't always installed —
 `cifs-utils` for SMB, `nfs-utils` (`nfs-common` on Debian/Ubuntu) for
 NFS. Without it, mount fails with a bare "unknown filesystem type", so

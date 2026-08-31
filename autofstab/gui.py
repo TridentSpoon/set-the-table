@@ -310,10 +310,24 @@ class NetworkShareDialog(Adw.Dialog):
 
         self.server_row = Adw.EntryRow(title="Server")
         self.server_row.set_tooltip_text("Hostname or IP address, e.g. nas.local or 192.168.1.50")
+        self.scan_button = Gtk.Button(
+            icon_name="system-search-symbolic",
+            valign=Gtk.Align.CENTER,
+            tooltip_text="Look for file servers on your network",
+        )
+        self.scan_button.connect("clicked", self._on_scan_clicked)
+        self.server_row.add_suffix(self.scan_button)
         server_group.add(self.server_row)
 
         self.share_row = Adw.EntryRow(title="Share name")
         self.share_row.connect("changed", lambda *_: self._suggest_mountpoint())
+        self.browse_button = Gtk.Button(
+            icon_name="folder-remote-symbolic",
+            valign=Gtk.Align.CENTER,
+            tooltip_text="List what this server is sharing",
+        )
+        self.browse_button.connect("clicked", self._on_browse_clicked)
+        self.share_row.add_suffix(self.browse_button)
         server_group.add(self.share_row)
         page.add(server_group)
 
@@ -382,6 +396,108 @@ class NetworkShareDialog(Adw.Dialog):
             self._current_kind(), self.server_row.get_text().strip() or "server", share_text, ""
         )
         self.mount_row.set_text(network.default_mountpoint(probe))
+
+    def _choose_from(self, heading, description, items, on_choose):
+        """A small list dialog for picking a discovered server or share."""
+        dialog = Adw.Dialog()
+        dialog.set_title(heading)
+        dialog.set_content_width(420)
+        dialog.set_follows_content_size(True)
+        dialog.set_presentation_mode(Adw.DialogPresentationMode.FLOATING)
+
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(Adw.HeaderBar())
+        page = Adw.PreferencesPage()
+        group = Adw.PreferencesGroup(description=description)
+
+        for title, subtitle, value in items:
+            row = Adw.ActionRow(title=title, subtitle=subtitle or "")
+            row.set_activatable(True)
+
+            def picked(_row, chosen=value):
+                dialog.close()
+                on_choose(chosen)
+
+            row.connect("activated", picked)
+            group.add(row)
+
+        page.add(group)
+        toolbar.set_content(page)
+        dialog.set_child(toolbar)
+        dialog.present(self)
+
+    def _busy(self, button, busy, label):
+        button.set_sensitive(not busy)
+        self.note_label.set_text(label) if busy else self._sync_kind()
+
+    def _on_scan_clicked(self, button):
+        # A connect-scan of the local subnet; off the main loop so the
+        # dialog stays responsive while it runs.
+        self._busy(self.scan_button, True, "Looking for file servers on your network…")
+        _run_in_thread(network.discover_servers, self._on_scan_done)
+
+    def _on_scan_done(self, servers):
+        self._busy(self.scan_button, False, "")
+        if not servers:
+            self._busy(self.scan_button, True,
+                       "No file servers answered on this network. If the NAS is on, "
+                       "you can still type its address in by hand.")
+            self.scan_button.set_sensitive(True)
+            return
+
+        items = []
+        for server in servers:
+            offers = " and ".join("SMB" if s == network.SMB else "NFS" for s in server.services)
+            items.append((server.name or server.host, f"{server.host} — offers {offers}", server))
+        self._choose_from("Servers found", "Pick one to fill in its address.", items, self._apply_server)
+
+    def _apply_server(self, server):
+        self.server_row.set_text(server.host)
+        # Follow what the server actually offers, rather than leaving a
+        # type selected that it can't do.
+        if network.NFS in server.services and network.SMB not in server.services:
+            self.kind_row.set_selected(1)
+        elif network.SMB in server.services and network.NFS not in server.services:
+            self.kind_row.set_selected(0)
+
+    def _on_browse_clicked(self, button):
+        server = self.server_row.get_text().strip()
+        if not server:
+            self.server_row.add_css_class("error")
+            return
+        self.server_row.remove_css_class("error")
+
+        kind = self._current_kind()
+        username = self.username_row.get_text().strip()
+        password = self.password_row.get_text()
+        self._busy(self.browse_button, True, f"Asking {server} what it shares…")
+
+        def work():
+            if kind == network.NFS:
+                return network.list_nfs_exports(server)
+            return network.list_smb_shares(server, username, password)
+
+        _run_in_thread(work, self._on_browse_done)
+
+    def _on_browse_done(self, shares):
+        self._busy(self.browse_button, False, "")
+        self.browse_button.set_sensitive(True)
+        if not shares:
+            hint = (
+                "No exports came back. The server may not be sharing over NFS."
+                if self._current_kind() == network.NFS
+                else "No shares came back. Most servers won't list their shares "
+                     "without a username and password — fill those in and try again."
+            )
+            self._busy(self.browse_button, True, hint)
+            self.browse_button.set_sensitive(True)
+            return
+        items = [(s, None, s) for s in shares]
+        self._choose_from("Shares available", "Pick one to fill it in.", items, self._apply_share)
+
+    def _apply_share(self, share_name):
+        self._mount_edited = False
+        self.share_row.set_text(share_name)
 
     def _on_add_clicked(self, button):
         server = self.server_row.get_text().strip()
@@ -1021,7 +1137,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
         self.reload_btn = Gtk.Button(
             icon_name="view-refresh-symbolic",
-            tooltip_text="Reload from disk — check that a save actually took effect",
+            tooltip_text="Refresh / Reconnect — re-read the file, then mount anything in it that isn't mounted",
         )
         self.reload_btn.connect("clicked", lambda b: self._on_reload(None, None))
         header.pack_end(self.reload_btn)
@@ -1033,7 +1149,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Add entry manually…", "win.add_manual")
         menu.append("Add a network drive…", "win.add_network")
-        menu.append("Reload from disk", "win.reload")
+        menu.append("Refresh / Reconnect", "win.reload")
         menu.append("Open other file…", "win.open")
         menu.append("About Set the Table", "win.about")
         menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main menu")
