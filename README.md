@@ -122,8 +122,8 @@ The window has:
   (same as the ↻ button), **Open other file…** (handy for pointing the
   app at a test file), and **About Set the Table**.
 
-**Network drives (NAS, Windows shares):** the menu's **Add a network
-drive…** handles SMB/CIFS and NFS. Entries are written with
+**Network drives (NAS, Windows shares):** the **+** dialog's
+**Advanced** tab handles SMB/CIFS and NFS. Entries are written with
 `noauto,x-systemd.automount,_netdev`, which matters more than it looks:
 a plain network entry makes systemd wait on the mount at boot and then
 fail `remote-fs.target`, which can drop the machine to an emergency

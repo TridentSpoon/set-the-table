@@ -265,38 +265,23 @@ class EntryRow(Gtk.ListBoxRow):
         self.set_child(row)
 
 
-class NetworkShareDialog(Adw.Dialog):
-    """Add a NAS / network share.
+class NetworkSharePage(Adw.PreferencesPage):
+    """Form for adding a NAS / network share.
 
-    Kept separate from the block-device form because the useful questions
-    are different (server and share name, not a UUID) and because the
-    options that make a network mount safe -- mount-on-access rather than
-    at boot -- aren't something the user should have to know to type.
+    A page rather than a dialog so it can sit as a tab inside the "+"
+    dialog alongside the local-drive picker. The questions here are
+    different from a local drive's -- a server and share name, not a
+    UUID -- and the options that make a network mount safe, chiefly
+    mount-on-access instead of at boot, aren't something anyone should
+    have to know to type.
     """
 
-    def __init__(self, parent_window: Gtk.Window, on_save):
+    def __init__(self, parent_window: Gtk.Window, on_save, on_done=None):
         super().__init__()
         self.parent_window = parent_window
         self.on_save = on_save
-        self.set_title("Add a network drive")
-        self.set_content_width(480)
-        self.set_follows_content_size(True)
-        self.set_presentation_mode(Adw.DialogPresentationMode.FLOATING)
-
-        toolbar_view = Adw.ToolbarView()
-        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
-
-        cancel = Gtk.Button(label="Cancel")
-        cancel.connect("clicked", lambda b: self.close())
-        header.pack_start(cancel)
-
-        add = Gtk.Button(label="Add")
-        add.add_css_class("suggested-action")
-        add.connect("clicked", self._on_add_clicked)
-        header.pack_end(add)
-        toolbar_view.add_top_bar(header)
-
-        page = Adw.PreferencesPage()
+        # Lets the containing dialog close itself once a share is added.
+        self.on_done = on_done
 
         server_group = Adw.PreferencesGroup(title="Where is it?")
         self.kind_row = Adw.ComboRow(title="Type")
@@ -329,12 +314,12 @@ class NetworkShareDialog(Adw.Dialog):
         self.browse_button.connect("clicked", self._on_browse_clicked)
         self.share_row.add_suffix(self.browse_button)
         server_group.add(self.share_row)
-        page.add(server_group)
+        self.add(server_group)
 
         mount_group = Adw.PreferencesGroup(title="Where should it appear?")
         self.mount_row = Adw.EntryRow(title="Mount point")
         mount_group.add(self.mount_row)
-        page.add(mount_group)
+        self.add(mount_group)
 
         self.auth_group = Adw.PreferencesGroup(
             title="Sign in",
@@ -346,16 +331,21 @@ class NetworkShareDialog(Adw.Dialog):
         self.auth_group.add(self.username_row)
         self.password_row = Adw.PasswordEntryRow(title="Password")
         self.auth_group.add(self.password_row)
-        page.add(self.auth_group)
+        self.add(self.auth_group)
 
         self.note_group = Adw.PreferencesGroup()
         self.note_label = Gtk.Label(xalign=0, wrap=True)
         self.note_label.add_css_class("caption")
         self.note_group.add(self.note_label)
-        page.add(self.note_group)
+        self.add(self.note_group)
 
-        toolbar_view.set_content(page)
-        self.set_child(toolbar_view)
+        action_group = Adw.PreferencesGroup()
+        self.add_button = Gtk.Button(label="Add network drive", halign=Gtk.Align.END)
+        self.add_button.add_css_class("suggested-action")
+        self.add_button.connect("clicked", self._on_add_clicked)
+        action_group.add(self.add_button)
+        self.add(action_group)
+
         self._sync_kind()
 
     def _current_kind(self):
@@ -521,7 +511,8 @@ class NetworkShareDialog(Adw.Dialog):
             password=self.password_row.get_text() or None if kind == network.SMB else None,
         )
         self.on_save(share_obj)
-        self.close()
+        if self.on_done:
+            self.on_done()
 
 
 class AboutDialog(Adw.Dialog):
@@ -639,9 +630,10 @@ class DevicePickerDialog(Adw.Dialog):
     UUID isn't available) -- that's the right choice essentially always, so
     it isn't exposed as a user-facing decision."""
 
-    def __init__(self, parent_window: Gtk.Window, on_pick):
+    def __init__(self, parent_window: Gtk.Window, on_pick, on_network_save=None):
         super().__init__()
         self.on_pick = on_pick
+        self.on_network_save = on_network_save
         self.parent_window = parent_window
         self._windows_rows = []
         self._suggested_rows = []
@@ -676,6 +668,14 @@ class DevicePickerDialog(Adw.Dialog):
         toolbar_view = Adw.ToolbarView()
         header = Adw.HeaderBar(show_end_title_buttons=False)
         toolbar_view.add_top_bar(header)
+
+        # Two tabs: the drive picker most people want, and an "Advanced"
+        # tab for network shares, which need a different set of questions
+        # entirely and shouldn't crowd the common case.
+        self.view_stack = Adw.ViewStack()
+        header.set_title_widget(Adw.ViewSwitcher(
+            stack=self.view_stack, policy=Adw.ViewSwitcherPolicy.WIDE
+        ))
 
         page = Adw.PreferencesPage()
 
@@ -724,7 +724,18 @@ class DevicePickerDialog(Adw.Dialog):
         )
         page.add(self.usb_group)
 
-        toolbar_view.set_content(page)
+        self.view_stack.add_titled_with_icon(page, "drives", "Drives", "drive-harddisk-symbolic")
+
+        self.network_page = NetworkSharePage(
+            parent_window,
+            on_save=on_network_save or (lambda share: None),
+            on_done=self.close,
+        )
+        self.view_stack.add_titled_with_icon(
+            self.network_page, "advanced", "Advanced", "network-server-symbolic"
+        )
+
+        toolbar_view.set_content(self.view_stack)
         self.set_child(toolbar_view)
 
         try:
@@ -1148,7 +1159,6 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
         menu = Gio.Menu()
         menu.append("Add entry manually…", "win.add_manual")
-        menu.append("Add a network drive…", "win.add_network")
         menu.append("Refresh / Reconnect", "win.reload")
         menu.append("Open other file…", "win.open")
         menu.append("About Set the Table", "win.about")
@@ -1156,7 +1166,6 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         header.pack_end(menu_btn)
 
         self._add_action("add_manual", self._on_add_manual_clicked)
-        self._add_action("add_network", self._on_add_network_clicked)
         self._add_action("reload", self._on_reload)
         self._add_action("open", self._on_open)
         self._add_action("about", self._on_about)
@@ -1446,13 +1455,14 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             self.lock_btn.set_tooltip_text("System-critical entries (boot, system drive) are locked — click to unlock")
 
     def _on_add_clicked(self, button):
-        DevicePickerDialog(self, on_pick=self._quick_add_device).present(self)
+        DevicePickerDialog(
+            self,
+            on_pick=self._quick_add_device,
+            on_network_save=self._add_network_share,
+        ).present(self)
 
     def _on_add_manual_clicked(self, action, param):
         EntryFormDialog(self, entry=None, on_save=self._add_entry_confirmed).present(self)
-
-    def _on_add_network_clicked(self, action, param):
-        NetworkShareDialog(self, on_save=self._add_network_share).present(self)
 
     def _add_network_share(self, share):
         if share.kind == network.NFS:

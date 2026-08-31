@@ -35,7 +35,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk
 
 from autofstab import gui
-from autofstab.gui import NetworkShareDialog
+from autofstab.gui import NetworkSharePage
 from autofstab.model import Entry
 from autofstab.privileged import AuthResult, PrivilegedWriteResult
 
@@ -454,6 +454,41 @@ def run_checks(app, window):
     window._add_network_share(network.NetworkShare(network.SMB, "srv", "open", "/mnt/open"))
     check("a guest share stages no secret", window._pending_credentials == [])
 
+    # -- "+" dialog tabs ----------------------------------------------------
+    saved_shares = []
+    tabbed = gui.DevicePickerDialog(
+        window, on_pick=lambda d, n: None, on_network_save=saved_shares.append
+    )
+    pages = []
+    child = tabbed.view_stack.get_first_child()
+    while child is not None:
+        page_info = tabbed.view_stack.get_page(child)
+        pages.append(page_info.get_name())
+        child = child.get_next_sibling()
+    check("the + dialog has both tabs", pages == ["drives", "advanced"])
+    check("Drives is the tab shown first", tabbed.view_stack.get_visible_child_name() == "drives")
+    check("the advanced tab holds the network form", isinstance(tabbed.network_page, NetworkSharePage))
+
+    # Adding from the tab must reach the window and close the dialog.
+    tabbed.present(window)
+    tabbed.network_page.server_row.set_text("10.0.0.9")
+    tabbed.network_page.share_row.set_text("/export/data")
+    tabbed.network_page.kind_row.set_selected(1)
+    tabbed.network_page.mount_row.set_text("/mnt/data")
+    tabbed.network_page._on_add_clicked(None)
+    check("adding from the advanced tab reaches the window", len(saved_shares) == 1)
+    check("the added share carries the typed details",
+          saved_shares[0].server == "10.0.0.9" and saved_shares[0].share == "/export/data")
+    check("adding from the tab closes the dialog", pump_until(lambda: not tabbed.get_mapped()))
+
+    # A page used standalone (no owner to close) must not blow up.
+    orphan = NetworkSharePage(window, on_save=lambda s: None)
+    orphan.server_row.set_text("h")
+    orphan.share_row.set_text("s")
+    orphan.mount_row.set_text("/mnt/s")
+    orphan._on_add_clicked(None)
+    check("a page with no owning dialog still adds cleanly", True)
+
     # -- discovery ---------------------------------------------------------
     # Real scans are avoided here (slow, and dependent on what's powered on);
     # the wiring is exercised with stubbed results instead.
@@ -464,7 +499,7 @@ def run_checks(app, window):
     orig_nfs = network.list_nfs_exports
     orig_smb = network.list_smb_shares
 
-    scan_dialog = NetworkShareDialog(window, on_save=lambda s: None)
+    scan_dialog = NetworkSharePage(window, on_save=lambda s: None)
     try:
         network.discover_servers = lambda *a, **k: [
             network.DiscoveredServer("10.0.0.5", [network.SMB, network.NFS], "NAS"),
@@ -520,7 +555,7 @@ def run_checks(app, window):
     check("SMB browse passes the password via the environment", 'env["PASSWD"]' in smb_src)
     check("SMB browse never puts the password in argv", '"-U", username' in smb_src and "password]" not in smb_src)
 
-    dialog = NetworkShareDialog(window, on_save=lambda s: None)
+    dialog = NetworkSharePage(window, on_save=lambda s: None)
     check("network dialog builds", dialog is not None)
     check("SMB selected shows the sign-in fields", dialog.auth_group.get_visible() is True)
     dialog.kind_row.set_selected(1)
