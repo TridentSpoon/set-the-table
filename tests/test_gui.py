@@ -402,8 +402,25 @@ def run_checks(app, window):
         network.default_mountpoint(network.NetworkShare(network.NFS, "s", "/volume1/media", "")) == "/mnt/media",
     )
 
+    # NFS version pinning: only when the server can't do v4, since a
+    # v4-capable server should be left free to negotiate the newest it has.
+    v3_entry, _ = network.build_entry(
+        network.NetworkShare(network.NFS, "s", "/export", "/mnt/x"), 3
+    )
+    v4_entry, _ = network.build_entry(
+        network.NetworkShare(network.NFS, "s", "/export", "/mnt/x"), 4
+    )
+    unknown_entry, _ = network.build_entry(
+        network.NetworkShare(network.NFS, "s", "/export", "/mnt/x"), None
+    )
+    check("a v3-only server gets nfsvers pinned", "nfsvers=3" in v3_entry.options)
+    check("a v4 server is left to negotiate", "nfsvers" not in v4_entry.options)
+    check("an unreachable server is left to negotiate", "nfsvers" not in unknown_entry.options)
+    check("SMB never gets an nfsvers option", "nfsvers" not in smb_entry.options)
+
     # Adding a share should stage its secret for the next save, not write
-    # it into the file being rendered.
+    # it into the file being rendered. SMB skips the NFS probe, so this
+    # completes synchronously.
     window._pending_credentials = []
     window._add_network_share(smb)
     staged = window._pending_credentials

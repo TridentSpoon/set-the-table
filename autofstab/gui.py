@@ -1339,7 +1339,27 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         NetworkShareDialog(self, on_save=self._add_network_share).present(self)
 
     def _add_network_share(self, share):
-        entry, credentials_path = network.build_entry(share)
+        if share.kind == network.NFS:
+            # Ask the server which NFS versions it speaks so the entry can
+            # pin one. rpcinfo goes over the network, so it runs off the
+            # main loop like every other blocking call here.
+            toast = Adw.Toast.new(f"Checking {share.server}…")
+            toast.set_timeout(0)
+            self._probe_toast = toast
+            self.toast_overlay.add_toast(toast)
+            _run_in_thread(
+                lambda: network.probe_nfs_version(share.server),
+                lambda version: self._finish_network_share(share, version),
+            )
+            return
+        self._finish_network_share(share, None)
+
+    def _finish_network_share(self, share, nfs_version):
+        if getattr(self, "_probe_toast", None) is not None:
+            self._probe_toast.dismiss()
+            self._probe_toast = None
+
+        entry, credentials_path = network.build_entry(share, nfs_version)
         if credentials_path:
             self._pending_credentials.append({
                 "path": credentials_path,

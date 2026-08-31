@@ -13,6 +13,7 @@ is simply a folder that isn't populated yet.
 
 import os
 import shutil
+import subprocess
 from typing import List, NamedTuple, Optional
 
 from .devices import _invoking_user_ids
@@ -86,8 +87,14 @@ def source_for(share: NetworkShare) -> str:
     return f"{share.server}:{export}"
 
 
-def options_for(share: NetworkShare, credentials_path: Optional[str] = None) -> str:
+def options_for(share: NetworkShare, credentials_path: Optional[str] = None,
+                nfs_version: Optional[int] = None) -> str:
     options: List[str] = list(BASE_NETWORK_OPTIONS)
+
+    # Only pin when the server can't do v4; a v4-capable server is
+    # better left to negotiate so it can use the newest it supports.
+    if share.kind == NFS and nfs_version and nfs_version < 4:
+        options.append(f"nfsvers={nfs_version}")
 
     if share.kind == SMB:
         # SMB has no Linux ownership of its own, so without uid/gid the
@@ -110,7 +117,44 @@ def credentials_content(username: str, password: str, domain: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_entry(share: NetworkShare):
+def probe_nfs_version(server: str, timeout: float = 4.0) -> Optional[int]:
+    """The highest NFS version `server` registers with rpcbind, or None.
+
+    Worth asking, because mount(8) with no nfsvers= tries 4.2 and
+    negotiates downward until something answers. Against a v3-only
+    server that walk costs a round of failed attempts on every automount
+    -- which the user feels directly, since the mount is triggered by
+    opening the folder. Pinning the version skips it.
+
+    Returns None when the answer is unclear (rpcinfo missing, server
+    unreachable, or a v4-only server, which needs no rpcbind entry at
+    all). Callers should then leave nfsvers= off and let mount
+    negotiate, which is the safe default.
+    """
+    if not shutil.which("rpcinfo"):
+        return None
+    try:
+        result = subprocess.run(
+            ["rpcinfo", "-p", server], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    versions = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        # "100003  3  tcp  2049  nfs" -- program 100003 is NFS itself.
+        if len(parts) >= 5 and parts[0] == "100003" and parts[-1] == "nfs":
+            try:
+                versions.append(int(parts[1]))
+            except ValueError:
+                continue
+    return max(versions) if versions else None
+
+
+def build_entry(share: NetworkShare, nfs_version: Optional[int] = None):
     """Turn a NetworkShare into (Entry, credentials_path_or_None).
 
     The returned Entry is safe to write to fstab: any password lives in
@@ -126,7 +170,7 @@ def build_entry(share: NetworkShare):
         device=source_for(share),
         mountpoint=share.mountpoint,
         fstype=share.kind,
-        options=options_for(share, credentials_path),
+        options=options_for(share, credentials_path, nfs_version),
         dump=0,
         passno=0,  # never fsck a network share
     )
