@@ -1769,24 +1769,51 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         self.toast_overlay.add_toast(Adw.Toast.new(summary))
 
     def _on_open(self, action, param):
-        dialog = Gtk.FileDialog()
-        dialog.set_title("Open fstab file")
+        """Point the app at a different fstab file.
 
-        def _on_chosen(source, result):
-            try:
-                file = source.open_finish(result)
-            except GLib.Error:
-                return
-            path = file.get_path()
-            if not path:
-                return
-            self.path = path
-            self.records = parse_fstab(path) if os.path.exists(path) else []
-            self.dirty = False
-            self._refresh_list()
-            self.title_widget.set_subtitle(path)
+        This retargets everything, Save included -- it is not a restore.
+        Opening a backup lets you read it, but saving writes back into
+        that backup, leaving the real fstab untouched.
+        """
 
-        dialog.open(self, None, _on_chosen)
+        def do_open():
+            dialog = Gtk.FileDialog()
+            dialog.set_title("Open fstab file")
+
+            def _on_chosen(source, result):
+                try:
+                    file = source.open_finish(result)
+                except GLib.Error:
+                    return
+                path = file.get_path()
+                if not path:
+                    return
+                self.path = path
+                self.records = parse_fstab(path) if os.path.exists(path) else []
+                self.dirty = False
+                # Secrets were staged for the file we're leaving; writing
+                # them alongside a different file would be wrong.
+                self._pending_credentials = []
+                self._refresh_list()
+                self.title_widget.set_subtitle(path)
+                toast = Adw.Toast.new(f"Now editing {os.path.basename(path)} — Save writes here, not /etc/fstab")
+                toast.set_timeout(6)
+                self.toast_overlay.add_toast(toast)
+
+            dialog.open(self, None, _on_chosen)
+
+        # Switching files throws away anything pending, so ask first --
+        # the same courtesy Refresh / Reconnect already extends.
+        if self.dirty:
+            self._confirm(
+                heading="Discard unsaved changes?",
+                body="Opening another file will drop the changes you haven't saved yet.",
+                ok_label="Discard",
+                destructive=True,
+                on_result=lambda ok: do_open() if ok else None,
+            )
+        else:
+            do_open()
 
     def _on_about(self, action, param):
         AboutDialog().present(self)

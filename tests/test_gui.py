@@ -603,6 +603,16 @@ def run_checks(app, window):
     check("saving asks systemd to reload", seen.get("reload") is True)
     check("saving creates missing mount points", "/mnt/definitely-not-here" in (seen.get("dirs") or []))
 
+    # -- "Open other file" retargets everything, including Save -------------
+    # It is not a restore: opening a backup and saving writes back into
+    # the backup. What it must not do is silently discard pending work or
+    # carry staged secrets across to a different file.
+    import inspect as _insp
+    open_src = _insp.getsource(window._on_open)
+    check("opening another file guards unsaved changes", "Discard unsaved changes?" in open_src)
+    check("opening another file drops staged secrets", "_pending_credentials = []" in open_src)
+    check("opening another file says where Save now writes", "Save writes here" in open_src)
+
     # -- about dialog + update check --------------------------------------
     from autofstab import updates
 
