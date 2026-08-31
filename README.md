@@ -28,13 +28,23 @@ need to match the app's name.)
 ./install.sh
 ```
 
-This copies the app to `~/.local/share/set-the-table`, adds a launcher to
+Run that from your clone of this repo. It copies the app to
+`~/.local/share/set-the-table`, adds a launcher to
 `~/.local/bin/set-the-table`, and installs a `.desktop` entry so **Set the
 Table** shows up in your application menu like any other installed app —
 no terminal needed after this one-time step. It checks for the GTK4/
 libadwaita dependencies above first and tells you exactly what to install
 if they're missing. Re-running `./install.sh` safely reinstalls over a
-previous copy (e.g. after pulling an update).
+previous copy, which is how you upgrade:
+
+```bash
+cd /path/to/set-the-table   # your clone, not ~/.local/share/set-the-table
+git pull
+./install.sh
+```
+
+The installed copy under `~/.local/share` is a plain file copy, not a git
+checkout, so `git pull` won't work from there.
 
 If it doesn't show up in your app menu right away, log out and back in,
 or test it directly with `gtk-launch io.github.autofstab.SetTheTable`.
