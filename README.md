@@ -153,6 +153,21 @@ shares without a username and password, so fill those in first. NFS
 entries also get `nfsvers=` pinned when the server can't do v4, which
 saves a failed 4.2 → 4.1 → 4.0 negotiation on every mount.
 
+Saving also creates any missing mount point folders and runs
+`systemctl daemon-reload`. Both matter: systemd only reads fstab through
+`systemd-fstab-generator`, which runs at boot and on daemon-reload, so
+without it a new `x-systemd.automount` entry sits in the file doing
+nothing until you reboot — and an automount unit won't start without its
+directory anyway.
+
+**Where the share shows up:** it's mounted at the path you chose (e.g.
+`/mnt/Home_File_Backup`), so it appears there as an ordinary folder. It
+will *not* show up on its own in Dolphin's Places, Devices, Removable
+Devices, or Remote — Devices comes from Solid/udisks2, which lists block
+devices, and Remote lists KIO bookmarks (`smb://`, `nfs://`), which are a
+separate mechanism from fstab entirely. Navigate to the mount point once
+and drag it into Places to pin it.
+
 Mounting needs a helper package that isn't always installed —
 `cifs-utils` for SMB, `nfs-utils` (`nfs-common` on Debian/Ubuntu) for
 NFS. Without it, mount fails with a bare "unknown filesystem type", so

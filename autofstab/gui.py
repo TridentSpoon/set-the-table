@@ -1593,6 +1593,25 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         else:
             self._write(content)
 
+    def _mountpoints_to_create(self):
+        """Mount points in the file that don't exist on disk yet.
+
+        Worth creating at save time rather than leaving to the mount step:
+        a systemd automount unit won't start without its directory, and
+        `noauto` entries (every network share) are skipped by Refresh, so
+        nothing else would ever create them.
+        """
+        wanted = []
+        for entry in self._entries():
+            mountpoint = entry.mountpoint
+            if not mountpoint.startswith("/") or mountpoint in ("none", "swap"):
+                continue
+            if (entry.fstype or "").lower() == "swap":
+                continue
+            if not os.path.isdir(mountpoint) and mountpoint not in wanted:
+                wanted.append(mountpoint)
+        return wanted
+
     def _write(self, content):
         backup_path = None
         try:
@@ -1614,7 +1633,9 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             self._auth_toast = toast
             self.toast_overlay.add_toast(toast)
             _run_in_thread(
-                lambda: write_with_pkexec(self.path, content, self._pending_credentials),
+                lambda: write_with_pkexec(
+                    self.path, content, self._pending_credentials, self._mountpoints_to_create()
+                ),
                 self._on_privileged_write_done,
             )
             return

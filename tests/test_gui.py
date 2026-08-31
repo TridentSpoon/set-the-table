@@ -284,7 +284,7 @@ def run_checks(app, window):
         raise PermissionError("simulated: backup needs root")
 
     gui.backup_fstab = backup_denied
-    gui.write_with_pkexec = lambda path, c, creds=None: PrivilegedWriteResult(True, "/etc/fstab.bak.fake", None, False)
+    gui.write_with_pkexec = lambda path, c, *a, **k: PrivilegedWriteResult(True, "/etc/fstab.bak.fake", None, False)
     try:
         window.dirty = True
         window._write(content)
@@ -298,7 +298,7 @@ def run_checks(app, window):
         gui.backup_fstab = original_backup
 
     gui.backup_fstab = backup_denied
-    gui.write_with_pkexec = lambda path, c, creds=None: PrivilegedWriteResult(False, None, None, True)
+    gui.write_with_pkexec = lambda path, c, *a, **k: PrivilegedWriteResult(False, None, None, True)
     try:
         window.dirty = True
         window._write(content)
@@ -309,7 +309,7 @@ def run_checks(app, window):
         gui.backup_fstab = original_backup
 
     gui.backup_fstab = backup_denied
-    gui.write_with_pkexec = lambda path, c, creds=None: PrivilegedWriteResult(False, None, "pkexec missing", False)
+    gui.write_with_pkexec = lambda path, c, *a, **k: PrivilegedWriteResult(False, None, "pkexec missing", False)
     try:
         window.dirty = True
         window._write(content)
@@ -434,7 +434,7 @@ def run_checks(app, window):
     # a root-owned 0600 file.
     captured = {}
     orig_write = gui.write_with_pkexec
-    def fake_write(path, content, creds=None):
+    def fake_write(path, content, creds=None, *args, **kwargs):
         captured["creds"] = creds
         return PrivilegedWriteResult(True, None, None, False)
 
@@ -567,6 +567,41 @@ def run_checks(app, window):
         "the dialog explains the boot behaviour",
         "still boots" in dialog.note_label.get_text() or "boots normally" in dialog.note_label.get_text(),
     )
+
+    # -- saving must actually take effect ----------------------------------
+    # A correct fstab entry does nothing on its own: systemd only learns
+    # about it via daemon-reload, and an automount unit won't start
+    # without its mount point directory. Both were missing originally,
+    # which left network shares written but completely inert.
+    window.records = [
+        Entry("//nas/share", "/mnt/definitely-not-here", "cifs",
+              "noauto,x-systemd.automount,_netdev", 0, 0, existing=True),
+        Entry("UUID=SWAP-X", "none", "swap", "sw", 0, 0, existing=True),
+        Entry("UUID=ROOT-X", "/", "btrfs", "defaults", 0, 1, existing=True),
+    ]
+    wanted = window._mountpoints_to_create()
+    check("a missing mount point is queued for creation", "/mnt/definitely-not-here" in wanted)
+    check("swap is never given a directory", "none" not in wanted)
+    check("an existing mount point isn't recreated", "/" not in wanted)
+
+    seen = {}
+
+    def capture_write(path, content, creds=None, ensure_dirs=None, daemon_reload=True):
+        seen["dirs"] = ensure_dirs
+        seen["reload"] = daemon_reload
+        return PrivilegedWriteResult(True, None, None, False)
+
+    orig_w = gui.write_with_pkexec
+    gui.write_with_pkexec = capture_write
+    try:
+        window._pending_credentials = [{"path": "/etc/x", "content": "y"}]
+        window.dirty = True
+        window._write("# body\n")
+        pump_until(lambda: window.save_btn.get_sensitive() is True)
+    finally:
+        gui.write_with_pkexec = orig_w
+    check("saving asks systemd to reload", seen.get("reload") is True)
+    check("saving creates missing mount points", "/mnt/definitely-not-here" in (seen.get("dirs") or []))
 
     # -- about dialog + update check --------------------------------------
     from autofstab import updates

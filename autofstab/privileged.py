@@ -44,7 +44,33 @@ tmp_path = target + ".autofstab.tmp"
 with open(tmp_path, "w") as f:
     f.write(content)
 os.replace(tmp_path, target)
-sys.stdout.write(backup_path)
+
+# A mount point that doesn't exist can't be mounted, and systemd's
+# automount units refuse to start without one.
+created = []
+for directory in payload.get("ensure_dirs", []):
+    if not os.path.isdir(directory):
+        try:
+            os.makedirs(directory, exist_ok=True)
+            created.append(directory)
+        except OSError:
+            pass
+
+# systemd only reads fstab through systemd-fstab-generator, which runs
+# at boot and on daemon-reload. Without this the new entry exists in the
+# file but systemd knows nothing about it -- so x-systemd.automount does
+# nothing at all until the next reboot.
+reloaded = False
+if payload.get("daemon_reload"):
+    try:
+        import subprocess as sp
+        reloaded = sp.run(["systemctl", "daemon-reload"], timeout=30).returncode == 0
+    except Exception:
+        reloaded = False
+
+sys.stdout.write(json.dumps({
+    "backup_path": backup_path, "created": created, "reloaded": reloaded
+}))
 """
 
 _MOUNT_SCRIPT = """
@@ -181,7 +207,8 @@ def mount_with_pkexec(mountpoints: List[str], timeout: float = 120.0) -> MountRe
     )
 
 
-def write_with_pkexec(path: str, content: str, credentials=None) -> PrivilegedWriteResult:
+def write_with_pkexec(path: str, content: str, credentials=None,
+                      ensure_dirs=None, daemon_reload: bool = True) -> PrivilegedWriteResult:
     """Back up and write `content` to `path` as root via pkexec.
 
     `credentials` is an optional list of {"path", "content"} dicts written
@@ -192,7 +219,13 @@ def write_with_pkexec(path: str, content: str, credentials=None) -> PrivilegedWr
     if not shutil.which("pkexec"):
         return PrivilegedWriteResult(False, None, _NO_PKEXEC_MESSAGE, False)
 
-    payload = {"target": path, "content": content, "credentials": credentials or []}
+    payload = {
+        "target": path,
+        "content": content,
+        "credentials": credentials or [],
+        "ensure_dirs": ensure_dirs or [],
+        "daemon_reload": daemon_reload,
+    }
 
     try:
         result = subprocess.run(
@@ -211,4 +244,9 @@ def write_with_pkexec(path: str, content: str, credentials=None) -> PrivilegedWr
         error = result.stderr.strip() or f"pkexec exited with status {result.returncode}"
         return PrivilegedWriteResult(False, None, error, False)
 
-    return PrivilegedWriteResult(True, result.stdout.strip() or None, None, False)
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        # Older helper output was a bare backup path; treat it as success.
+        return PrivilegedWriteResult(True, result.stdout.strip() or None, None, False)
+    return PrivilegedWriteResult(True, report.get("backup_path") or None, None, False)
