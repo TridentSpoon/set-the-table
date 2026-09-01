@@ -15,7 +15,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
 from . import __version__
 from .backup import backup_fstab, diff_against, list_backups
@@ -596,6 +596,23 @@ class RestoreBackupDialog(Adw.Dialog):
         dialog.choose(self, None, responded)
 
 
+def _make_spinner():
+    """A spinner that also works on libadwaita 1.5.
+
+    Adw.Spinner only exists from libadwaita 1.6 onwards; Ubuntu 24.04 LTS
+    still ships 1.5, where merely naming it raises AttributeError and took
+    the whole About dialog down with it -- the menu item just did nothing,
+    with the traceback going to a terminal a desktop-launched user never
+    sees. Gtk.Spinner is the older equivalent; unlike Adw.Spinner it has to
+    be told to spin, but it stops drawing while hidden either way.
+    """
+    if hasattr(Adw, "Spinner"):
+        return Adw.Spinner()
+    spinner = Gtk.Spinner()
+    spinner.start()
+    return spinner
+
+
 class AboutDialog(Adw.Dialog):
     """About window with a working "Check for Updates" button.
 
@@ -646,7 +663,7 @@ class AboutDialog(Adw.Dialog):
             title="Check for Updates",
             subtitle="Asks GitHub for the latest release. Nothing is sent until you click.",
         )
-        self.update_spinner = Adw.Spinner()
+        self.update_spinner = _make_spinner()
         self.update_spinner.set_visible(False)
         self.update_row.add_suffix(self.update_spinner)
 
@@ -1338,20 +1355,27 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         existing_scrolled.set_vexpand(True)
         existing_scrolled.set_child(self.existing_listbox)
 
-        existing_label = Gtk.Label(label="Already in /etc/fstab", xalign=0)
-        existing_label.add_css_class("heading")
-        existing_label.add_css_class("dim-label")
+        # Named after the file actually open, not a hardcoded /etc/fstab --
+        # the README's own suggested first run is --file /tmp/test-fstab,
+        # where a header claiming /etc/fstab is simply wrong.
+        self.existing_label = Gtk.Label(label=f"Already in {self.path}", xalign=0)
+        self.existing_label.add_css_class("heading")
+        self.existing_label.add_css_class("dim-label")
+        # A long --file path would otherwise set the window's minimum width
+        # and push the lists wider than the clamp they're meant to sit in.
+        self.existing_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.existing_label.set_tooltip_text(self.path)
 
         existing_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         existing_section.set_vexpand(True)
-        existing_section.append(existing_label)
+        existing_section.append(self.existing_label)
         existing_section.append(existing_scrolled)
 
         # No shared outer scroll -- each section scrolls its own list
         # independently and expands/shrinks with the window, splitting the
         # available height between them (Gtk.Box distributes space equally
         # among vexpand children; a hidden section gets excluded entirely,
-        # so "Already in /etc/fstab" alone takes the full height while
+        # so the "Already in <file>" section alone takes the full height while
         # "Pending changes" has nothing in it).
         lists_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         lists_box.set_vexpand(True)
@@ -1939,6 +1963,8 @@ class AutoFstabWindow(Adw.ApplicationWindow):
                 self._pending_credentials = []
                 self._refresh_list()
                 self.title_widget.set_subtitle(path)
+                self.existing_label.set_label(f"Already in {path}")
+                self.existing_label.set_tooltip_text(path)
                 toast = Adw.Toast.new(f"Now editing {os.path.basename(path)} — Save writes here, not /etc/fstab")
                 toast.set_timeout(6)
                 self.toast_overlay.add_toast(toast)
