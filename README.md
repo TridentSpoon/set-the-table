@@ -14,10 +14,24 @@ need to match the app's name.)
 - Python 3.8+
 - `util-linux` (provides `lsblk` for device picking and `findmnt` for
   dry-run verification). Usually already installed on any Linux system.
-- For the GUI: GTK4 and libadwaita with their Python bindings (PyGObject).
+- For the GUI: **GTK 4.10+** and **libadwaita 1.5+**, with their Python
+  bindings (PyGObject). 1.5 is the real floor — the app is built on
+  `Adw.Dialog` and `Adw.AlertDialog`, which don't exist before it.
   - Arch/CachyOS: `sudo pacman -S python-gobject gtk4 libadwaita`
   - Debian/Ubuntu: `sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1`
   - Fedora: `sudo dnf install python3-gobject gtk4 libadwaita`
+
+  Anything shipping GNOME 46 or newer (Ubuntu 24.04 LTS, Fedora 40,
+  current Arch) is fine. Older stable releases — Debian 12 among them —
+  are too far back, and the fix is a newer distro release rather than
+  anything you can install alongside. To check what you have:
+
+  ```bash
+  python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw; print(f"GTK {Gtk.get_major_version()}.{Gtk.get_minor_version()}  libadwaita {Adw.get_major_version()}.{Adw.get_minor_version()}")'
+  ```
+
+  On libadwaita 1.5 exactly, the spinner in the About window's update
+  check falls back to the older GTK one. Nothing else differs.
 - `pkexec` (part of polkit, installed by default on virtually every desktop
   distro) — lets the GUI ask for your password graphically only when you
   click Save, instead of needing to launch the whole app as root.
