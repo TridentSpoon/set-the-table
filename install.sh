@@ -12,6 +12,11 @@ set -euo pipefail
 APP_NAME="Set the Table"
 APP_ID="io.github.autofstab.SetTheTable"
 
+# Set by what gui.py actually uses: Adw.Dialog/AlertDialog/AboutDialog are
+# libadwaita 1.5, Gtk.FileDialog/UriLauncher are GTK 4.10.
+GTK_MIN="4.10"
+ADW_MIN="1.5"
+
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$HOME/.local/share/set-the-table"
 BIN_DIR="$HOME/.local/bin"
@@ -24,16 +29,45 @@ if ! command -v python3 >/dev/null; then
     exit 1
 fi
 
-if ! python3 -c "
+# Prints "<gtk> <adw>" (e.g. "4.14 1.5"), or nothing if the bindings are
+# missing. Both numbers are needed: gi.require_version('Adw', '1') names the
+# ABI series, not the release, so it succeeds just as happily on libadwaita
+# 1.2 -- which would install cleanly here and then fail at runtime with a
+# bare AttributeError.
+GTK_ADW_VERSIONS="$(python3 -c "
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw
-" 2>/dev/null; then
+print(f'{Gtk.get_major_version()}.{Gtk.get_minor_version()} {Adw.get_major_version()}.{Adw.get_minor_version()}')
+" 2>/dev/null || true)"
+
+if [ -z "$GTK_ADW_VERSIONS" ]; then
     echo "Missing GTK4/libadwaita Python bindings (PyGObject). Install them first:" >&2
     echo "  Arch/CachyOS:   sudo pacman -S python-gobject gtk4 libadwaita" >&2
     echo "  Debian/Ubuntu:  sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1" >&2
     echo "  Fedora:         sudo dnf install python3-gobject gtk4 libadwaita" >&2
+    exit 1
+fi
+
+GTK_HAVE="${GTK_ADW_VERSIONS% *}"
+ADW_HAVE="${GTK_ADW_VERSIONS#* }"
+
+# True when $1 is at least $2. sort -V sorts 4.9 before 4.10; string and
+# float comparisons both get that backwards.
+version_ge() {
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+}
+
+if ! version_ge "$GTK_HAVE" "$GTK_MIN" || ! version_ge "$ADW_HAVE" "$ADW_MIN"; then
+    echo "GTK/libadwaita are too old for $APP_NAME:" >&2
+    echo "  GTK         need $GTK_MIN+, have $GTK_HAVE" >&2
+    echo "  libadwaita  need $ADW_MIN+, have $ADW_HAVE" >&2
+    echo "" >&2
+    echo "These ship with your desktop rather than as add-on packages, so" >&2
+    echo "installing more won't raise them. libadwaita $ADW_MIN is GNOME 46" >&2
+    echo "(spring 2024) -- this needs a distro release from then or later:" >&2
+    echo "Ubuntu 24.04 LTS, Debian 13, Fedora 40, or current Arch all qualify." >&2
     exit 1
 fi
 
