@@ -124,3 +124,20 @@ def automount_mountpoints(entries: List[Entry]) -> List[str]:
         if e.mountpoint.startswith("/")
         and any(o.strip() == "x-systemd.automount" for o in (e.options or "").split(","))
     ]
+
+
+def read_records(path: str):
+    """(records, error) for `path`, where error is None on success.
+
+    A file that exists but can't be read must never come back as an empty
+    list. Saving would then replace contents nobody was ever allowed to
+    see -- and since both front ends can escalate to root, "couldn't read
+    it" is no protection at all. Absence is the genuinely different case:
+    an fstab that isn't there yet really is empty.
+    """
+    try:
+        return parse_fstab(path), None
+    except FileNotFoundError:
+        return [], None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, str(exc)

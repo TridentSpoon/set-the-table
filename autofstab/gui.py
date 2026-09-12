@@ -32,7 +32,7 @@ from .devices import (
 )
 from .model import (
     Entry, automount_mountpoints, format_entry_line, mountpoints_to_create,
-    parse_fstab, render_fstab,
+    parse_fstab, read_records, render_fstab,
 )
 from .privileged import authenticate_via_pkexec, mount_with_pkexec, write_with_pkexec
 from . import network, updates
@@ -597,23 +597,6 @@ class RestoreBackupDialog(Adw.Dialog):
                 self.on_restore(backup)
 
         dialog.choose(self, None, responded)
-
-
-def _read_records(path):
-    """(records, error) for `path`, where error is None on success.
-
-    A file that exists but can't be read must never come back as an empty
-    list. Saving would then replace contents nobody was ever allowed to
-    see -- and since saving can escalate to root, "couldn't read it" is no
-    protection at all. Absence is the genuinely different case: an fstab
-    that isn't there yet really is empty.
-    """
-    try:
-        return parse_fstab(path), None
-    except FileNotFoundError:
-        return [], None
-    except (OSError, UnicodeDecodeError) as exc:
-        return None, str(exc)
 
 
 def _make_spinner():
@@ -1206,7 +1189,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         # save -- batched so adding a share costs one password prompt,
         # not one per share plus another for the fstab write.
         self._pending_credentials = []
-        self.records, self._read_error = _read_records(path)
+        self.records, self._read_error = read_records(path)
         if self._read_error is not None:
             self.records = []
 
@@ -1842,7 +1825,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             # rather than leaving the pre-restore records on screen.
             restored = self._restoring_from
             self._restoring_from = None
-            records, error = _read_records(self.path)
+            records, error = read_records(self.path)
             if error is not None:
                 self._info(
                     "Restored, but can't re-read the file",
@@ -1871,7 +1854,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
     def _on_reload(self, action, param):
         def do_reload():
-            records, error = _read_records(self.path)
+            records, error = read_records(self.path)
             if error is not None:
                 # Keep what's on screen: blanking the list here would be the
                 # same data loss by another route, since the next save would
@@ -1996,7 +1979,7 @@ class AutoFstabWindow(Adw.ApplicationWindow):
                 path = file.get_path()
                 if not path:
                     return
-                records, error = _read_records(path)
+                records, error = read_records(path)
                 if error is not None:
                     # Stay on the current file rather than switching to one
                     # whose contents we can't see.

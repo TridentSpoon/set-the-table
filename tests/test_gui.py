@@ -706,7 +706,7 @@ def run_checks(app, window):
         f.write("# precious\nUUID=AAAA /data ext4 defaults,nofail 0 2\n")
     os.chmod(unreadable, 0o000)
 
-    records, error = gui._read_records(unreadable)
+    records, error = gui.read_records(unreadable)
     if os.geteuid() == 0:
         # root ignores the mode bits, so this half can't be exercised as root.
         check("unreadable file is readable as root (check skipped)", error is None)
@@ -714,12 +714,12 @@ def run_checks(app, window):
         check("an unreadable file does not come back empty", records is None)
         check("an unreadable file reports why", bool(error))
 
-    missing_records, missing_error = gui._read_records(
+    missing_records, missing_error = gui.read_records(
         os.path.join(unreadable_dir, "definitely-absent"))
     check("a genuinely missing file is empty, not an error", missing_records == [])
     check("a missing file reports no error", missing_error is None)
 
-    good_records, good_error = gui._read_records(window.path)
+    good_records, good_error = gui.read_records(window.path)
     check("a readable file still parses", good_error is None and good_records is not None)
 
     os.chmod(unreadable, 0o644)
