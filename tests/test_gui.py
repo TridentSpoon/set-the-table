@@ -22,6 +22,7 @@ the same live data rather than hardcoded.
 
 import os
 import sys
+import tempfile
 import time
 import traceback
 
@@ -694,6 +695,43 @@ def run_checks(app, window):
 
     import shutil as _sh
     _sh.rmtree(tmpdir, ignore_errors=True)
+
+    # -- an unreadable file must never look like an empty one ----------------
+    # Both halves of this matter: os.path.exists() is False when a parent
+    # directory isn't traversable and True when only the file is unreadable,
+    # and the old code got the first wrong silently and crashed on the second.
+    unreadable_dir = tempfile.mkdtemp()
+    unreadable = os.path.join(unreadable_dir, "fstab")
+    with open(unreadable, "w") as f:
+        f.write("# precious\nUUID=AAAA /data ext4 defaults,nofail 0 2\n")
+    os.chmod(unreadable, 0o000)
+
+    records, error = gui._read_records(unreadable)
+    if os.geteuid() == 0:
+        # root ignores the mode bits, so this half can't be exercised as root.
+        check("unreadable file is readable as root (check skipped)", error is None)
+    else:
+        check("an unreadable file does not come back empty", records is None)
+        check("an unreadable file reports why", bool(error))
+
+    missing_records, missing_error = gui._read_records(
+        os.path.join(unreadable_dir, "definitely-absent"))
+    check("a genuinely missing file is empty, not an error", missing_records == [])
+    check("a missing file reports no error", missing_error is None)
+
+    good_records, good_error = gui._read_records(window.path)
+    check("a readable file still parses", good_error is None and good_records is not None)
+
+    os.chmod(unreadable, 0o644)
+    _sh.rmtree(unreadable_dir, ignore_errors=True)
+
+    # A window that failed to read its file must refuse to write one.
+    saved_error = getattr(window, "_read_error", None)
+    window._read_error = "simulated read failure"
+    before_save = len(window._entries())
+    window._on_save_clicked(None)
+    check("save is refused when the file was never read", len(window._entries()) == before_save)
+    window._read_error = saved_error
 
     # -- dev-only menu item --------------------------------------------------
     check("Open other file is hidden by default", window.dev_mode is False)
