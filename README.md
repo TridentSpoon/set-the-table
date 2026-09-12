@@ -46,9 +46,10 @@ Run that from your clone of this repo. It copies the app to
 `~/.local/share/set-the-table`, adds a launcher to
 `~/.local/bin/set-the-table`, and installs a `.desktop` entry so **Set the
 Table** shows up in your application menu like any other installed app —
-no terminal needed after this one-time step. It checks for the GTK4/
-libadwaita dependencies above first and tells you exactly what to install
-if they're missing. Re-running `./install.sh` safely reinstalls over a
+no terminal needed after this one-time step. It checks the GTK4/libadwaita
+dependencies above first — both that they're present and that they're new
+enough — and stops with what to install, or which versions you have versus
+the ones you need. Re-running `./install.sh` safely reinstalls over a
 previous copy, which is how you upgrade:
 
 ```bash
