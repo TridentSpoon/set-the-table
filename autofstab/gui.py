@@ -599,6 +599,23 @@ class RestoreBackupDialog(Adw.Dialog):
         dialog.choose(self, None, responded)
 
 
+def _read_records(path):
+    """(records, error) for `path`, where error is None on success.
+
+    A file that exists but can't be read must never come back as an empty
+    list. Saving would then replace contents nobody was ever allowed to
+    see -- and since saving can escalate to root, "couldn't read it" is no
+    protection at all. Absence is the genuinely different case: an fstab
+    that isn't there yet really is empty.
+    """
+    try:
+        return parse_fstab(path), None
+    except FileNotFoundError:
+        return [], None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, str(exc)
+
+
 def _make_spinner():
     """A spinner that also works on libadwaita 1.5.
 
@@ -1189,11 +1206,19 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         # save -- batched so adding a share costs one password prompt,
         # not one per share plus another for the fstab write.
         self._pending_credentials = []
-        self.records = parse_fstab(path) if os.path.exists(path) else []
+        self.records, self._read_error = _read_records(path)
+        if self._read_error is not None:
+            self.records = []
 
         self._build_ui()
         self._refresh_list()
         self.connect("close-request", self._on_close_request)
+
+        if self._read_error is not None:
+            # Deferred like the startup toast below: a dialog presented
+            # before the window has a real size allocation lands badly.
+            self.save_btn.set_sensitive(False)
+            self.connect("map", self._warn_unreadable)
 
         if check_updates:
             GLib.timeout_add_seconds(2, self._check_updates_on_launch)
@@ -1206,6 +1231,14 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             # kind of layout glitch reported (content sliding off to the
             # left). "map" only fires once real geometry exists.
             self.connect("map", self._show_startup_toast)
+
+    def _warn_unreadable(self, *args):
+        self._info(
+            "Can't read this file",
+            f"{self.path} is there, but couldn't be read:\n\n{self._read_error}\n\n"
+            "Saving is switched off, because writing now would replace "
+            "contents that were never loaded. Re-launch with sudo to edit it.",
+        )
 
     def _check_updates_on_launch(self):
         _run_in_thread(lambda: updates.check_for_update(__version__), self._on_launch_update)
@@ -1706,6 +1739,14 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         )
 
     def _on_save_clicked(self, button):
+        if getattr(self, "_read_error", None) is not None:
+            # Belt and braces: the button is already insensitive, but a save
+            # here would write an empty list over a file we never read.
+            self._info(
+                "Can't save",
+                f"{self.path} was never loaded, so there's nothing safe to write back.",
+            )
+            return
         errors, warnings = validate_entries(self._entries())
         if errors:
             self._info("Cannot save", "Fix these issues first:", extra_widget=_validation_report_widget(errors, []))
@@ -1801,7 +1842,15 @@ class AutoFstabWindow(Adw.ApplicationWindow):
             # rather than leaving the pre-restore records on screen.
             restored = self._restoring_from
             self._restoring_from = None
-            self.records = parse_fstab(self.path) if os.path.exists(self.path) else []
+            records, error = _read_records(self.path)
+            if error is not None:
+                self._info(
+                    "Restored, but can't re-read the file",
+                    f"{self.path} was written, but reading it back failed:\n\n{error}\n\n"
+                    "What's on screen may no longer match what's on disk.",
+                )
+                return
+            self.records = records
             self.dirty = False
             self._refresh_list()
             toast = Adw.Toast.new(f"Restored the backup from {restored.when:%H:%M:%S}")
@@ -1822,7 +1871,19 @@ class AutoFstabWindow(Adw.ApplicationWindow):
 
     def _on_reload(self, action, param):
         def do_reload():
-            self.records = parse_fstab(self.path) if os.path.exists(self.path) else []
+            records, error = _read_records(self.path)
+            if error is not None:
+                # Keep what's on screen: blanking the list here would be the
+                # same data loss by another route, since the next save would
+                # write that empty list back out.
+                self._info(
+                    "Can't re-read this file",
+                    f"{self.path} is there, but couldn't be read:\n\n{error}\n\n"
+                    "Nothing has been changed -- you're still looking at what "
+                    "was loaded before.",
+                )
+                return
+            self.records = records
             self.dirty = False
             self._refresh_list()
             self._offer_to_mount_pending()
@@ -1935,8 +1996,18 @@ class AutoFstabWindow(Adw.ApplicationWindow):
                 path = file.get_path()
                 if not path:
                     return
+                records, error = _read_records(path)
+                if error is not None:
+                    # Stay on the current file rather than switching to one
+                    # whose contents we can't see.
+                    self._info(
+                        "Can't read that file",
+                        f"{path} is there, but couldn't be read:\n\n{error}\n\n"
+                        f"Still editing {self.path}.",
+                    )
+                    return
                 self.path = path
-                self.records = parse_fstab(path) if os.path.exists(path) else []
+                self.records = records
                 self.dirty = False
                 # Secrets were staged for the file we're leaving; writing
                 # them alongside a different file would be wrong.
