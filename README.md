@@ -255,12 +255,30 @@ Same safety rails, text-menu driven:
 
 ```bash
 python3 autofstab.py --file /tmp/test-fstab
-# or, for the real file:
-sudo python3 autofstab.py
+# or, for the real file -- no sudo needed to start it:
+python3 autofstab.py
 ```
 
-Menu options: list, add, edit, remove, validate, save (backup + validate +
-dry-run + write), reload from disk, quit.
+Menu options: list, add, add network share, edit, remove, validate, save
+(backup + validate + dry-run + write), reload from disk, quit.
+
+Like the GUI, it launches unprivileged. Browse and edit freely; when the
+save needs root it offers to escalate that one step with `sudo` and carries
+on in the same session, so declining the prompt costs you the save and not
+your work. Only the write runs as root — never the editor.
+
+**Network drives (NAS, Windows shares)** work here too, from the same
+`network` code the GUI uses, so both front ends emit identical fstab lines.
+It can scan the local network for servers, list a server's exports (NFS) or
+shares (SMB), and suggest a mount point. SMB passwords are typed hidden,
+never echoed, never placed in `ps`-visible arguments, and never written to
+fstab — they go into a root-only `0600` file under
+`/etc/samba/credentials/`, which is why saving a share always needs the
+password prompt.
+
+If it can't *read* the file you pointed it at — as opposed to the file not
+existing — it stops rather than starting from a blank slate, since saving
+would otherwise replace contents it was never able to see.
 
 ### Shared behavior
 
@@ -277,7 +295,8 @@ autofstab/
   devices.py      lsblk-based device discovery + smart mount defaults (shared)
   validate.py     structural checks + findmnt dry-run (shared)
   backup.py       timestamped backups (shared)
-  privileged.py   pkexec-based write fallback for the GUI
+  privileged.py   privileged write helper -- pkexec for the GUI, sudo for the CLI
+  network.py      SMB/NFS discovery, browsing and entry building (shared)
   cli.py          text-menu front end
   gui.py          GTK4/libadwaita front end
 autofstab.py       CLI entry point
