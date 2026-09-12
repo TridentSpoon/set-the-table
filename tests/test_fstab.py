@@ -1,13 +1,16 @@
 import os
 import pwd
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from autofstab.model import (
     Entry, RawLine, automount_mountpoints, mountpoints_to_create, parse_fstab,
-    render_fstab,
+    read_records, render_fstab,
 )
 from autofstab.devices import _invoking_user_ids
 from autofstab.validate import validate_entries
@@ -195,6 +198,94 @@ class TestInvokingUser(unittest.TestCase):
     def test_garbage_pkexec_uid_does_not_raise(self):
         os.environ["PKEXEC_UID"] = "not-a-number"
         self.assertEqual(_invoking_user_ids(), ("not-a-number", "not-a-number"))
+
+
+class TestReadRecords(unittest.TestCase):
+    """An unreadable file must never be mistaken for an empty one: both front
+    ends can escalate to root, so a later save would overwrite contents that
+    were never visible."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+    def test_readable_file_parses(self):
+        path = os.path.join(self.tmpdir, "fstab")
+        with open(path, "w") as f:
+            f.write(SAMPLE)
+        records, error = read_records(path)
+        self.assertIsNone(error)
+        self.assertTrue(records)
+
+    def test_missing_file_is_empty_not_an_error(self):
+        records, error = read_records(os.path.join(self.tmpdir, "absent"))
+        self.assertEqual(records, [])
+        self.assertIsNone(error)
+
+    def test_unreadable_file_is_an_error_not_empty(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the mode bits")
+        path = os.path.join(self.tmpdir, "locked")
+        with open(path, "w") as f:
+            f.write(SAMPLE)
+        os.chmod(path, 0o000)
+        records, error = read_records(path)
+        self.assertIsNone(records)
+        self.assertTrue(error)
+
+    def test_unreadable_directory_is_an_error_not_empty(self):
+        """The nastier half: os.path.exists() returns False here, which is how
+        this used to read as 'the file is empty' rather than as a failure."""
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the mode bits")
+        locked_dir = os.path.join(self.tmpdir, "locked_dir")
+        os.mkdir(locked_dir)
+        path = os.path.join(locked_dir, "fstab")
+        with open(path, "w") as f:
+            f.write(SAMPLE)
+        os.chmod(locked_dir, 0o000)
+        self.addCleanup(os.chmod, locked_dir, 0o755)
+        self.assertFalse(os.path.exists(path))   # the trap
+        records, error = read_records(path)
+        self.assertIsNone(records)
+        self.assertTrue(error)
+
+
+class TestCliEndOfInput(unittest.TestCase):
+    """Ctrl-D / Ctrl-C / the end of piped input must not produce a traceback."""
+
+    ENTRY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "autofstab.py")
+
+    def _run(self, stdin_text):
+        with tempfile.NamedTemporaryFile("w", suffix="-fstab", delete=False) as f:
+            f.write("# scratch\n")
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        return subprocess.run(
+            [sys.executable, self.ENTRY, "--file", path],
+            input=stdin_text, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_eof_at_the_menu_is_clean(self):
+        result = self._run("")
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertNotIn("EOFError", result.stdout + result.stderr)
+        self.assertIn("Input ended", result.stdout)
+        self.assertEqual(result.returncode, 1)
+
+    def test_eof_midway_through_a_prompt_is_clean(self):
+        # Stops partway into the manual add flow, so EOF lands on prompt()
+        # rather than on the menu's own input().
+        result = self._run("2\n2\ntmpfs\n")
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertIn("Input ended", result.stdout)
+        self.assertEqual(result.returncode, 1)
+
+    def test_explicit_quit_still_succeeds(self):
+        result = self._run("9\n")
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

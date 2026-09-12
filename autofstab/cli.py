@@ -12,7 +12,7 @@ from .backup import backup_fstab
 from .devices import get_mountpoint, identifier_for, list_block_devices
 from .model import (
     Entry, RawLine, Record, automount_mountpoints, format_entry_line,
-    mountpoints_to_create, parse_fstab, render_fstab,
+    mountpoints_to_create, parse_fstab, read_records, render_fstab,
 )
 from .privileged import write_with_sudo
 from .validate import dry_run_verify, validate_entries
@@ -453,16 +453,14 @@ def main() -> int:
     # second as an empty file would be silent data loss: the save step can
     # escalate, so it would cheerfully replace a file whose contents we were
     # never allowed to see, with whatever the empty session produced.
-    try:
-        records = parse_fstab(path)
-    except FileNotFoundError:
-        print(f"'{path}' does not exist yet -- starting with an empty fstab.")
-        records = []
-    except PermissionError:
-        print(f"Can't read {path} -- permission denied.")
+    records, read_error = read_records(path)
+    if read_error is not None:
+        print(f"Can't read {path}:\n  {read_error}")
         print("Refusing to go further: saving later could replace a file whose")
         print("contents were never visible here. Re-run with sudo to edit it.")
         return 1
+    if not records and not os.path.exists(path):
+        print(f"'{path}' does not exist yet -- starting with an empty fstab.")
 
     if path == "/etc/fstab" and os.geteuid() != 0:
         print("Note: you are not root. Browse and edit freely -- only the save itself")
@@ -471,6 +469,22 @@ def main() -> int:
     dirty = False
     pending_credentials: List[dict] = []
 
+    try:
+        return _menu_loop(records, path, dirty, pending_credentials)
+    except (EOFError, KeyboardInterrupt):
+        # Ctrl-D, Ctrl-C, or the end of piped input, at any prompt in any
+        # sub-flow. There is no way to ask whether to discard unsaved work --
+        # the input stream is exactly what just went away -- so say what
+        # happened plainly instead of dying with a traceback. Nothing is
+        # written either way: the file is only ever touched by an explicit
+        # save.
+        print()
+        print("Input ended. Any unsaved changes were discarded; the file was")
+        print("only ever touched by an explicit save.")
+        return 1
+
+
+def _menu_loop(records, path, dirty, pending_credentials) -> int:
     while True:
         print(MENU)
         choice = input("> ").strip().lower()
@@ -495,7 +509,15 @@ def main() -> int:
         elif choice == "8":
             if dirty and not confirm("Discard unsaved changes?", default=False):
                 continue
-            records = parse_fstab(path) if os.path.exists(path) else []
+            reloaded, error = read_records(path)
+            if error is not None:
+                # Keep what's in memory: replacing it with an empty list would
+                # be the same data loss by another route, since the next save
+                # would write that back out.
+                print(f"Can't re-read {path}:\n  {error}")
+                print("Nothing changed -- still showing what was loaded before.")
+                continue
+            records = reloaded
             dirty = False
             # Staged secrets belonged to the discarded edits.
             pending_credentials.clear()
@@ -503,11 +525,9 @@ def main() -> int:
         elif choice in ("9", "q", "quit", "exit"):
             if dirty and not confirm("You have unsaved changes. Quit anyway?", default=False):
                 continue
-            break
+            return 0
         else:
             print("Unrecognized option.")
-
-    return 0
 
 
 if __name__ == "__main__":
