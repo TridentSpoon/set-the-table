@@ -6,6 +6,7 @@ least 4 fields (device, mountpoint, fstype, options[, dump[, pass]]) are
 treated as real entries; everything else is preserved verbatim.
 """
 
+import os
 from dataclasses import dataclass
 from typing import List, Union
 
@@ -90,3 +91,36 @@ def render_fstab(records: List[Record]) -> str:
 
 def format_entry_line(entry: Entry) -> str:
     return f"{entry.device}  {entry.mountpoint}  {entry.fstype}  {entry.options}  {entry.dump}  {entry.passno}"
+
+
+def mountpoints_to_create(entries: List[Entry]) -> List[str]:
+    """Mount points in `entries` that don't exist on disk yet.
+
+    Worth creating at save time rather than leaving to the mount step: a
+    systemd automount unit won't start without its directory, and `noauto`
+    entries (every network share) are skipped by Refresh, so nothing else
+    would ever create them.
+    """
+    wanted: List[str] = []
+    for entry in entries:
+        mountpoint = entry.mountpoint
+        if not mountpoint.startswith("/") or mountpoint in ("none", "swap"):
+            continue
+        if (entry.fstype or "").lower() == "swap":
+            continue
+        if not os.path.isdir(mountpoint) and mountpoint not in wanted:
+            wanted.append(mountpoint)
+    return wanted
+
+
+def automount_mountpoints(entries: List[Entry]) -> List[str]:
+    """Mount points whose entry uses x-systemd.automount.
+
+    These need their unit started before the folder is actually watched;
+    generating the unit isn't enough on its own.
+    """
+    return [
+        e.mountpoint for e in entries
+        if e.mountpoint.startswith("/")
+        and any(o.strip() == "x-systemd.automount" for o in (e.options or "").split(","))
+    ]

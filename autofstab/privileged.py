@@ -127,6 +127,11 @@ _NO_PKEXEC_MESSAGE = (
     "Re-run this app with sudo instead."
 )
 
+_NO_SUDO_MESSAGE = (
+    "sudo is not installed, so this can't escalate on its own. Re-run the "
+    "whole app as root instead."
+)
+
 
 class PrivilegedWriteResult(NamedTuple):
     ok: bool
@@ -263,9 +268,59 @@ def write_with_pkexec(path: str, content: str, credentials=None,
         error = result.stderr.strip() or f"pkexec exited with status {result.returncode}"
         return PrivilegedWriteResult(False, None, error, False)
 
+    return _parse_write_output(result.stdout)
+
+
+def write_with_sudo(path: str, content: str, credentials=None,
+                    ensure_dirs=None, daemon_reload: bool = True,
+                    start_automounts=None) -> PrivilegedWriteResult:
+    """The terminal counterpart to write_with_pkexec.
+
+    Same helper script, so the root side behaves identically, and the
+    payload still travels over stdin -- a share password never reaches
+    argv. sudo rather than pkexec because this runs in a TTY, where pkexec
+    needs a polkit agent that a plain SSH session often hasn't got.
+
+    stderr is left attached to the terminal on purpose: that is where
+    sudo's own "[sudo] password for ..." prompt has to appear for the user
+    to answer it. Only stdout is captured, which carries the helper's JSON.
+    """
+    if not shutil.which("sudo"):
+        return PrivilegedWriteResult(False, None, _NO_SUDO_MESSAGE, False)
+
+    payload = {
+        "target": path,
+        "content": content,
+        "credentials": credentials or [],
+        "ensure_dirs": ensure_dirs or [],
+        "daemon_reload": daemon_reload,
+        "start_automounts": start_automounts or [],
+    }
+
     try:
-        report = json.loads(result.stdout)
+        result = subprocess.run(
+            ["sudo", sys.executable, "-c", _HELPER_SCRIPT],
+            input=json.dumps(payload),
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        return PrivilegedWriteResult(False, None, _NO_SUDO_MESSAGE, False)
+
+    if result.returncode != 0:
+        # A wrong password or a refusal exits non-zero, and sudo has already
+        # said so on the terminal -- don't invent a second message over it.
+        return PrivilegedWriteResult(
+            False, None, f"sudo exited with status {result.returncode}", False
+        )
+
+    return _parse_write_output(result.stdout)
+
+
+def _parse_write_output(stdout: str) -> PrivilegedWriteResult:
+    try:
+        report = json.loads(stdout)
     except json.JSONDecodeError:
         # Older helper output was a bare backup path; treat it as success.
-        return PrivilegedWriteResult(True, result.stdout.strip() or None, None, False)
+        return PrivilegedWriteResult(True, stdout.strip() or None, None, False)
     return PrivilegedWriteResult(True, report.get("backup_path") or None, None, False)
