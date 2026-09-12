@@ -30,7 +30,10 @@ from .devices import (
     resolve_device_index,
     suggest_mount_settings,
 )
-from .model import Entry, format_entry_line, parse_fstab, render_fstab
+from .model import (
+    Entry, automount_mountpoints, format_entry_line, mountpoints_to_create,
+    parse_fstab, render_fstab,
+)
 from .privileged import authenticate_via_pkexec, mount_with_pkexec, write_with_pkexec
 from . import network, updates
 from .validate import dry_run_verify, validate_entries
@@ -1733,36 +1736,13 @@ class AutoFstabWindow(Adw.ApplicationWindow):
         else:
             self._write(content)
 
+    # Both of these are shared with the CLI, which needs exactly the same
+    # answers at its own save step -- see autofstab/model.py.
     def _automount_mountpoints(self):
-        """Mount points whose entry uses x-systemd.automount.
-
-        These need their unit started before the folder is actually
-        watched; generating the unit isn't enough on its own.
-        """
-        return [
-            e.mountpoint for e in self._entries()
-            if e.mountpoint.startswith("/")
-            and any(o.strip() == "x-systemd.automount" for o in (e.options or "").split(","))
-        ]
+        return automount_mountpoints(self._entries())
 
     def _mountpoints_to_create(self):
-        """Mount points in the file that don't exist on disk yet.
-
-        Worth creating at save time rather than leaving to the mount step:
-        a systemd automount unit won't start without its directory, and
-        `noauto` entries (every network share) are skipped by Refresh, so
-        nothing else would ever create them.
-        """
-        wanted = []
-        for entry in self._entries():
-            mountpoint = entry.mountpoint
-            if not mountpoint.startswith("/") or mountpoint in ("none", "swap"):
-                continue
-            if (entry.fstype or "").lower() == "swap":
-                continue
-            if not os.path.isdir(mountpoint) and mountpoint not in wanted:
-                wanted.append(mountpoint)
-        return wanted
+        return mountpoints_to_create(self._entries())
 
     def _write(self, content):
         backup_path = None
