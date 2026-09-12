@@ -1,10 +1,15 @@
 import os
+import pwd
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from autofstab.model import Entry, RawLine, parse_fstab, render_fstab
+from autofstab.model import (
+    Entry, RawLine, automount_mountpoints, mountpoints_to_create, parse_fstab,
+    render_fstab,
+)
+from autofstab.devices import _invoking_user_ids
 from autofstab.validate import validate_entries
 
 SAMPLE = """\
@@ -111,6 +116,85 @@ def parse_fstab_from_text(text):
         return parse_fstab(path)
     finally:
         os.unlink(path)
+
+
+
+class TestMountpointHelpers(unittest.TestCase):
+    """These are shared by both front ends, so a regression here would hit
+    the GUI's save step and the CLI's alike."""
+
+    def test_missing_mountpoint_is_queued(self):
+        entry = Entry("UUID=x", "/definitely/not/here", "ext4", "defaults", 0, 2)
+        self.assertEqual(mountpoints_to_create([entry]), ["/definitely/not/here"])
+
+    def test_existing_mountpoint_is_not_queued(self):
+        entry = Entry("UUID=x", "/tmp", "ext4", "defaults", 0, 2)
+        self.assertEqual(mountpoints_to_create([entry]), [])
+
+    def test_swap_never_gets_a_directory(self):
+        by_mountpoint = Entry("UUID=x", "none", "swap", "sw", 0, 0)
+        by_fstype = Entry("UUID=y", "/nope", "swap", "sw", 0, 0)
+        self.assertEqual(mountpoints_to_create([by_mountpoint, by_fstype]), [])
+
+    def test_duplicate_mountpoints_queued_once(self):
+        a = Entry("UUID=x", "/definitely/not/here", "ext4", "defaults", 0, 2)
+        b = Entry("UUID=y", "/definitely/not/here", "ext4", "defaults", 0, 2)
+        self.assertEqual(mountpoints_to_create([a, b]), ["/definitely/not/here"])
+
+    def test_automount_entry_is_detected(self):
+        share = Entry("//nas/media", "/mnt/media", "cifs",
+                      "noauto,x-systemd.automount,_netdev", 0, 0)
+        self.assertEqual(automount_mountpoints([share]), ["/mnt/media"])
+
+    def test_plain_noauto_is_not_an_automount(self):
+        entry = Entry("UUID=x", "/mnt/thing", "ext4", "noauto", 0, 2)
+        self.assertEqual(automount_mountpoints([entry]), [])
+
+    def test_substring_option_does_not_count(self):
+        """'x-systemd.automount-ish' must not match x-systemd.automount."""
+        entry = Entry("UUID=x", "/mnt/thing", "ext4", "x-systemd.automounted", 0, 2)
+        self.assertEqual(automount_mountpoints([entry]), [])
+
+
+class TestInvokingUser(unittest.TestCase):
+    """Getting this wrong hands every NTFS drive and SMB share to root."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ("SUDO_UID", "SUDO_GID", "PKEXEC_UID")}
+        for k in self._saved:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_sudo_env_wins(self):
+        os.environ["SUDO_UID"], os.environ["SUDO_GID"] = "1000", "1000"
+        self.assertEqual(_invoking_user_ids(), ("1000", "1000"))
+
+    def test_pkexec_uid_is_honoured(self):
+        """pkexec sets PKEXEC_UID, not SUDO_UID -- without this the fallback
+        returns root's 0/0 and the share ends up root-owned."""
+        os.environ["PKEXEC_UID"] = "0"
+        self.assertEqual(_invoking_user_ids(), ("0", str(pwd.getpwuid(0).pw_gid)))
+
+    def test_pkexec_uid_gid_comes_from_passwd(self):
+        target = next((u for u in pwd.getpwall() if u.pw_uid != u.pw_gid and u.pw_uid > 0), None)
+        if target is None:
+            self.skipTest("no account with uid != gid on this system")
+        os.environ["PKEXEC_UID"] = str(target.pw_uid)
+        self.assertEqual(_invoking_user_ids(), (str(target.pw_uid), str(target.pw_gid)))
+
+    def test_unknown_pkexec_uid_falls_back_without_crashing(self):
+        os.environ["PKEXEC_UID"] = "4242424"
+        self.assertEqual(_invoking_user_ids(), ("4242424", "4242424"))
+
+    def test_garbage_pkexec_uid_does_not_raise(self):
+        os.environ["PKEXEC_UID"] = "not-a-number"
+        self.assertEqual(_invoking_user_ids(), ("not-a-number", "not-a-number"))
 
 
 if __name__ == "__main__":

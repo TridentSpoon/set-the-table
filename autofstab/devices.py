@@ -2,6 +2,7 @@
 
 import json
 import os
+import pwd
 import subprocess
 from typing import Dict, List, Optional
 
@@ -190,6 +191,21 @@ def _invoking_user_ids() -> "tuple[str, str]":
     gid = os.environ.get("SUDO_GID")
     if uid and gid:
         return uid, gid
+
+    # pkexec sets PKEXEC_UID rather than SUDO_UID, and only the uid -- so
+    # the group has to be looked up from it. Without this branch the
+    # fallback below returns root's 0/0 under pkexec, quietly handing every
+    # NTFS drive and SMB share to root: the exact outcome the docstring
+    # above says this function exists to prevent.
+    pkexec_uid = os.environ.get("PKEXEC_UID")
+    if pkexec_uid:
+        try:
+            return pkexec_uid, str(pwd.getpwuid(int(pkexec_uid)).pw_gid)
+        except (KeyError, ValueError, OverflowError):
+            # Every mainstream distro gives each user a private group of the
+            # same id, so that is the best guess left if the lookup fails.
+            return pkexec_uid, pkexec_uid
+
     return str(os.getuid()), str(os.getgid())
 
 
